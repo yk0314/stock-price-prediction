@@ -1,0 +1,15 @@
+{
+  "name": "jp-stock-ai-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "日本株AI予測Webアプリ Phase 1（完全無料構成）",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "pipeline": "node src/pipeline.js",
+    "test": "node test/unit.test.js"
+  },
+  "dependencies": {}
+}

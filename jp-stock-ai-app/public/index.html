@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>日本株AI予測（Phase 1）</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>日本株AI予測Webアプリ（Phase 1）</h1>
+    <p id="meta-info">読み込み中...</p>
+    <p class="disclaimer">
+      本サイトの評価はAIによる参考情報です。「上昇期待度」「下落リスク」「信頼度」は
+      統計的に校正された確率ではなく、AIによる定性的な評価値です。
+      投資判断はご自身の責任で行ってください。投資利益を保証するものではありません。
+    </p>
+  </header>
+
+  <main>
+    <section>
+      <h2>AI評価ランキング</h2>
+      <div id="ranking-list">読み込み中...</div>
+    </section>
+
+    <section>
+      <h2>銘柄詳細</h2>
+      <input id="code-input" placeholder="銘柄コード（例: 7203）" />
+      <button id="search-button">検索</button>
+      <div id="detail-view"></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>
+      表示されているデータは、実際に取得可能だった時点（データ基準日 / cutoffDate）の情報のみを
+      使用しています。J-Quants Freeプランの仕様上、常に実行日から約3ヶ月前までのデータとなります。
+    </p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

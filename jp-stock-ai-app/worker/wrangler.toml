@@ -1,0 +1,9 @@
+name = "jp-stock-ai-app-api"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# 以下は実際のKV Namespace作成後に得られるIDに置き換えてください。
+# 作成コマンド例: npx wrangler kv namespace create STOCK_KV
+[[kv_namespaces]]
+binding = "STOCK_KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"

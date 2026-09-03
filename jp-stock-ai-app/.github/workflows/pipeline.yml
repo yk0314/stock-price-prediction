@@ -1,0 +1,48 @@
+name: JP Stock AI Pipeline
+
+on:
+  # Phase 1では手動実行のみ。パイプラインが安定するまで自動実行は追加しない。
+  workflow_dispatch:
+    inputs:
+      cutoffDate:
+        description: "cutoffDate (YYYY-MM-DD)。省略時は「実行日-90日」を自動計算します。"
+        required: false
+        default: ""
+
+  # --- 将来、日次自動実行を追加する場合は以下のコメントを外す ---
+  # schedule:
+  #   - cron: "0 9 * * 1-5" # UTC 09:00 = JST 18:00（平日）
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15 # 想定外の無限ループ等でActions無料枠を浪費しないよう上限を設定
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node.js セットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: パイプライン実行
+        env:
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_KV_NAMESPACE_ID: ${{ secrets.CF_KV_NAMESPACE_ID }}
+          CUTOFF_DATE: ${{ inputs.cutoffDate }}
+        run: node src/pipeline.js
+
+      # raw-data / normalized-data / features / screened / gemini-results / ranking の
+      # 各段階の中間データをartifactとして保存する。失敗時も原因調査できるよう常にアップロードする。
+      - name: 中間データ(data/)をartifactとしてアップロード
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-data-${{ github.run_id }}
+          path: data/
+          retention-days: 14
+          if-no-files-found: ignore
