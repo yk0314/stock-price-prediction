@@ -6,4 +6,4 @@ compatibility_date = "2026-01-01"
 # 作成コマンド例: npx wrangler kv namespace create STOCK_KV
 [[kv_namespaces]]
 binding = "STOCK_KV"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "c1393b19e3c248a194ed9ef222f8e3b9"
