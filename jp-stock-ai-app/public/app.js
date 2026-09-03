@@ -1,6 +1,6 @@
 // Cloudflare Workers API のベースURL。
 // デプロイ後、実際のWorkers URL（例: https://jp-stock-ai-app-api.your-subdomain.workers.dev）に置き換えること。
-const API_BASE = "https://jp-stock-ai-app-api.YOUR-SUBDOMAIN.workers.dev";
+const API_BASE = "https://jp-stock-ai-app-api.yk0314.workers.dev";
 
 async function fetchJson(path) {
   const res = await fetch(API_BASE + path);
@@ -19,16 +19,26 @@ function renderMeta(meta) {
   el.textContent =
     `データ基準日 (cutoffDate): ${meta.cutoffDate} ／ ` +
     `最終実行(predictionExecutedAt): ${meta.predictionExecutedAt ?? "-"} ／ ` +
-    `AI分析対象: ${meta.geminiCandidateCount ?? meta.analyzedCount ?? "-"}銘柄 ／ ` +
-    `対象ユニバース: ${meta.universeCodeCount ?? "-"}銘柄 (mode=${meta.universeMode ?? "-"})`;
+    `AI分析対象: ${
+      meta.geminiCandidateCount ?? meta.analyzedCount ?? "-"
+    }銘柄 ／ ` +
+    `対象ユニバース: ${meta.universeCodeCount ?? "-"}銘柄 (mode=${
+      meta.universeMode ?? "-"
+    })`;
 }
 
 function renderRankingItem(item) {
   const stanceClass =
-    item.stance === "positive" ? "positive" : item.stance === "negative" ? "negative" : "";
+    item.stance === "positive"
+      ? "positive"
+      : item.stance === "negative"
+      ? "negative"
+      : "";
   return `
     <div class="stock-card">
-      <div><strong>${item.code}</strong> <span class="score">${item.score ?? "-"} / 100</span></div>
+      <div><strong>${item.code}</strong> <span class="score">${
+    item.score ?? "-"
+  } / 100</span></div>
       <div class="${stanceClass}">
         上昇期待度: ${item.upsideProbability ?? "-"}% ／
         下落リスク: ${item.downsideRisk ?? "-"}% ／
@@ -53,7 +63,8 @@ async function loadRanking() {
       ? ranking.map(renderRankingItem).join("")
       : "現在、AI評価結果がありません。";
   } catch (err) {
-    el.textContent = "現在データを取得できませんでした。しばらくしてから再度お試しください。";
+    el.textContent =
+      "現在データを取得できませんでした。しばらくしてから再度お試しください。";
   }
 }
 
@@ -70,10 +81,13 @@ async function searchStock(code) {
   const el = document.getElementById("detail-view");
   el.textContent = "読み込み中...";
   try {
-    const analysis = await fetchJson(`/api/stocks/${encodeURIComponent(code)}/analysis`);
+    const analysis = await fetchJson(
+      `/api/stocks/${encodeURIComponent(code)}/analysis`
+    );
     el.innerHTML = renderRankingItem(analysis);
   } catch (err) {
-    el.textContent = "この銘柄のAI分析結果は見つかりませんでした。（スクリーニング対象外の可能性があります）";
+    el.textContent =
+      "この銘柄のAI分析結果は見つかりませんでした。（スクリーニング対象外の可能性があります）";
   }
 }
 
