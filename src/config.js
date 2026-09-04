@@ -27,15 +27,24 @@ export const config = {
   // 実際の遅延(12週間=84日)より安全側に余裕を持たせている。
   JQUANTS_DELAY_DAYS: 90,
 
-  // --- J-Quants レートリミット対策（Freeプラン: 5req/分） ---
+  // --- J-Quants レートリミット対策（Freeプラン: 公称5req/分だが、実測で余裕を持たせる） ---
   JQUANTS_RATE_LIMIT_PER_MIN: 5,
-  JQUANTS_REQUEST_INTERVAL_MS: 13000, // 12秒に1回のペースに余裕を持たせて13秒
+  JQUANTS_REQUEST_INTERVAL_MS: 15000, // 12秒に1回のペースに、実測の429発生を踏まえてさらに余裕を持たせて15秒
+  // 429(レートリミット)発生時、待機してから再試行する回数と待機時間。
+  // これは無料APIへの節度あるリトライであり、課金や有料モデルへの切替とは無関係。
+  // ここでも解消しなければ JQuantsApiError としてパイプラインを失敗させる。
+  JQUANTS_RETRY: {
+    maxRetriesOn429: 3,
+    retryBackoffMs: 20000, // 1回目20秒, 2回目40秒, 3回目60秒待機
+  },
 
   // --- 日付ベース一括取得の対象期間 ---
   // 「cutoffDateから何暦日遡って取得するか」。
-  // 土日・祝日を含むため、実際の営業日数(FEATURE_LOOKBACK_TRADING_DAYS)より多めに設定する。
+  // 土日・祝日を含むため、実際の営業日数(FEATURE_LOOKBACK_TRADING_DAYS+1)より多めに設定する。
   FETCH_LOOKBACK_CALENDAR_DAYS: 32,
-  // 特徴量計算に使う営業日数（この日数分のデータが揃わない銘柄は特徴量計算をスキップする）
+  // 特徴量の「Xd」比較で使う最大の営業日数（例: 20 なら 1d/5d/20d を計算する）。
+  // 実際にfeatures.jsが要求するデータ点数は「この値+1」（最新日を含めて20営業日前と比較するため）。
+  // この日数分のデータが揃わない銘柄は特徴量計算をスキップする。
   FEATURE_LOOKBACK_TRADING_DAYS: 20,
 
   // --- 数値スクリーニング ---
