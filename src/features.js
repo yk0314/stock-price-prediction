@@ -1,4 +1,5 @@
 import { config } from "./config.js";
+import { computeIndicators } from "./indicators.js";
 
 function pctChange(newValue, oldValue) {
   if (oldValue === undefined || oldValue === null || Number(oldValue) === 0) {
@@ -56,6 +57,8 @@ export function computeFeatures(code, rowsSortedAscFull) {
     ? volumes.reduce((sum, v) => sum + v, 0) / volumes.length
     : null;
 
+  const indicators = computeIndicators(rows);
+
   return {
     code,
     dataAsOf: latest.date,
@@ -64,6 +67,7 @@ export function computeFeatures(code, rowsSortedAscFull) {
     priceChange5d: d5 ? pctChange(latest.close, d5.close) : null,
     priceChange20d: d20 ? pctChange(latest.close, d20.close) : null,
     volumeChange20d: avgVolume ? pctChange(latest.volume, avgVolume) : null,
+    ...indicators,
   };
 }
 

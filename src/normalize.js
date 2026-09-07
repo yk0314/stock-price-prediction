@@ -13,6 +13,8 @@ const CANDIDATE_KEYS = {
   date: ["Date", "date", "D"],
   code: ["Code", "code", "LocalCode"],
   close: ["Close", "close", "C", "AdjustmentClose", "AdjClose"],
+  high: ["High", "high", "H", "AdjustmentHigh", "AdjHigh"],
+  low: ["Low", "low", "L", "AdjustmentLow", "AdjLow"],
   volume: ["Volume", "volume", "Vo", "AdjustmentVolume", "AdjVolume"],
 };
 
@@ -54,6 +56,8 @@ export function normalizeRawRow(row) {
   const rawCode = pick(row, CANDIDATE_KEYS.code);
   const date = normalizeDateString(pick(row, CANDIDATE_KEYS.date));
   const close = pick(row, CANDIDATE_KEYS.close);
+  const high = pick(row, CANDIDATE_KEYS.high);
+  const low = pick(row, CANDIDATE_KEYS.low);
   const volume = pick(row, CANDIDATE_KEYS.volume);
 
   if (!rawCode || !date || close === undefined) {
@@ -64,6 +68,8 @@ export function normalizeRawRow(row) {
     code: toShortCode(rawCode),
     date,
     close: Number(close),
+    high: high !== undefined ? Number(high) : null,
+    low: low !== undefined ? Number(low) : null,
     volume: volume !== undefined ? Number(volume) : null,
   };
 }
@@ -88,7 +94,13 @@ export function groupByCode(normalizedRows) {
   const map = new Map();
   for (const row of normalizedRows) {
     if (!map.has(row.code)) map.set(row.code, []);
-    map.get(row.code).push({ date: row.date, close: row.close, volume: row.volume });
+    map.get(row.code).push({
+      date: row.date,
+      close: row.close,
+      high: row.high,
+      low: row.low,
+      volume: row.volume,
+    });
   }
   for (const rows of map.values()) {
     rows.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));

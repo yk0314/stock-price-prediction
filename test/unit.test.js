@@ -6,6 +6,7 @@ import { config } from "../src/config.js";
 import { resolveCutoffDate, isOnOrBeforeCutoff } from "../src/cutoff.js";
 import { normalizeRawRow, normalizeRawRows, groupByCode } from "../src/normalize.js";
 import { computeFeatures, computeFeaturesForAll } from "../src/features.js";
+import { sma, ema, rsi, macd, bollingerBands, atr } from "../src/indicators.js";
 import { screenToPool, selectGeminiCandidates } from "../src/screening.js";
 import { evaluatePrediction, summarizeHitRateByScoreBand } from "../src/backtest.js";
 import { listCandidateDates, JQuantsClient, JQuantsApiError } from "../src/jquants.js";
@@ -133,7 +134,14 @@ await test("429が数回発生しても、その後成功すればエラーに�
 console.log("[test] normalize.js");
 await test("正規化: 標準カラム名 + 5桁コードは4桁化される", () => {
   const row = normalizeRawRow({ Code: "72030", Date: "20260601", Close: 1234.5, Volume: 100000 });
-  assert.deepEqual(row, { code: "7203", date: "2026-06-01", close: 1234.5, volume: 100000 });
+  assert.deepEqual(row, {
+    code: "7203",
+    date: "2026-06-01",
+    close: 1234.5,
+    high: null,
+    low: null,
+    volume: 100000,
+  });
 });
 await test("正規化: 5桁目が0以外のコードはそのまま維持される", () => {
   const row = normalizeRawRow({ Code: "72035", Date: "20260601", Close: 100, Volume: 10 });
@@ -141,7 +149,14 @@ await test("正規化: 5桁目が0以外のコードはそのまま維持され�
 });
 await test("正規化: 短縮カラム名(V2想定)", () => {
   const row = normalizeRawRow({ code: "72030", date: "2026-06-01", C: 1000, Vo: 500 });
-  assert.deepEqual(row, { code: "7203", date: "2026-06-01", close: 1000, volume: 500 });
+  assert.deepEqual(row, {
+    code: "7203",
+    date: "2026-06-01",
+    close: 1000,
+    high: null,
+    low: null,
+    volume: 500,
+  });
 });
 await test("正規化: 必須項目欠損時はnull", () => {
   assert.equal(normalizeRawRow({ Code: "72030" }), null);
@@ -162,46 +177,130 @@ await test("groupByCode: 銘柄ごとにグルーピングし日付昇順にソ�
 });
 
 console.log("[test] features.js");
-await test("computeFeatures: 21営業日未満(20点)はnull", () => {
-  const rows = [];
-  for (let i = 0; i < 20; i++) {
-    rows.push({
-      date: `2026-05-${String(i + 1).padStart(2, "0")}`,
-      close: 1000 + i * 5,
-      volume: 100000 + i * 100,
-    });
+function makeDateSeq(n, startDay = 1) {
+  const dates = [];
+  let day = startDay;
+  let month = 5;
+  for (let i = 0; i < n; i++) {
+    dates.push(`2026-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
+    day++;
+    if (day > 28) {
+      day = 1;
+      month++;
+    }
   }
+  return dates;
+}
+await test(`computeFeatures: 必要点数(${config.FEATURE_LOOKBACK_TRADING_DAYS}+1)未満はnull`, () => {
+  const n = config.FEATURE_LOOKBACK_TRADING_DAYS; // 1点足りない
+  const dates = makeDateSeq(n);
+  const rows = dates.map((date, i) => ({ date, close: 1000 + i * 5, volume: 100000 + i * 100 }));
   assert.equal(computeFeatures("X", rows), null);
 });
-await test("computeFeatures: 21営業日(20営業日前+最新)あれば正しく計算される", () => {
-  const rows = [];
-  for (let i = 0; i < 21; i++) {
-    rows.push({
-      date: `2026-05-${String(i + 1).padStart(2, "0")}`,
-      close: 1000 + i * 5,
-      volume: 100000 + i * 100,
-    });
-  }
+await test("computeFeatures: 必要点数ぴったりあれば正しく計算される（オフバイワン検証）", () => {
+  const n = config.FEATURE_LOOKBACK_TRADING_DAYS + 1;
+  const dates = makeDateSeq(n);
+  const rows = dates.map((date, i) => ({ date, close: 1000 + i * 5, volume: 100000 + i * 100 }));
   const f = computeFeatures("X", rows);
+  const latest = rows[rows.length - 1];
+  const d20 = rows[rows.length - 1 - config.FEATURE_LOOKBACK_TRADING_DAYS];
+  const d5 = rows[rows.length - 6];
+  const d1 = rows[rows.length - 2];
   assert.equal(f.code, "X");
-  assert.equal(f.dataAsOf, "2026-05-21");
-  assert.equal(f.price, 1100); // i=20 -> 1000+20*5
-  // priceChange20d は「20営業日前(i=0, close=1000)」との比較であるべき（オフバイワン修正の検証）
-  assert.equal(f.priceChange20d, 10); // (1100-1000)/1000*100 = 10%
-  // priceChange5d は「5営業日前(i=15, close=1075)」との比較
-  assert.ok(Math.abs(f.priceChange5d - ((1100 - 1075) / 1075) * 100) < 1e-9);
-  // priceChange1d は「1営業日前(i=19, close=1095)」との比較
-  assert.ok(Math.abs(f.priceChange1d - ((1100 - 1095) / 1095) * 100) < 1e-9);
+  assert.equal(f.dataAsOf, latest.date);
+  assert.equal(f.price, latest.close);
+  // priceChange20dは「config.FEATURE_LOOKBACK_TRADING_DAYS営業日前」との比較であるべき（オフバイワン修正の検証）
+  assert.ok(Math.abs(f.priceChange20d - ((latest.close - d20.close) / d20.close) * 100) < 1e-9);
+  assert.ok(Math.abs(f.priceChange5d - ((latest.close - d5.close) / d5.close) * 100) < 1e-9);
+  assert.ok(Math.abs(f.priceChange1d - ((latest.close - d1.close) / d1.close) * 100) < 1e-9);
+  // データ点数が20+1=21点の場合に計算可能な指標（SMA20/RSI14/BB20は必要データ数を満たす）
+  assert.ok(f.sma20 !== null);
+  assert.ok(f.rsi14 !== null);
+  assert.ok(f.bbUpper !== null);
+  assert.ok(!Number.isNaN(f.sma20) && Number.isFinite(f.sma20));
+  // MACD(12,26,9)は最低35点必要なため、21点しか無いこの設定ではnullになるのが正しい
+  // （無理に値を入れず、データ不足を明示するという要求どおりの挙動）
+  assert.equal(f.macd, null);
+  assert.equal(f.macdSignal, null);
+  assert.equal(f.ema26, null); // EMA26も26点必要なため同様にnull
 });
 await test("computeFeaturesForAll: Mapを渡すと配列で返る", () => {
-  const rows = [];
-  for (let i = 0; i < 21; i++) {
-    rows.push({ date: `2026-05-${String(i + 1).padStart(2, "0")}`, close: 100 + i, volume: 1000 });
-  }
+  const n = config.FEATURE_LOOKBACK_TRADING_DAYS + 1;
+  const dates = makeDateSeq(n);
+  const rows = dates.map((date, i) => ({ date, close: 100 + i, volume: 1000 }));
   const grouped = new Map([["A", rows], ["B", [{ date: "2026-05-01", close: 1, volume: 1 }]]]);
   const features = computeFeaturesForAll(grouped);
   assert.equal(features.length, 1); // Bはデータ不足で除外される
   assert.equal(features[0].code, "A");
+});
+await test("computeFeatures: 渡された配列の最後の日付だけをdataAsOfとして使う（cutoffDateフィルタは呼び出し側の責務であることの確認）", () => {
+  // features.js自体は日付を見て自律的にフィルタしているわけではなく、
+  // 「渡された配列の末尾を最新（=cutoffDate時点）として扱う」だけである。
+  // つまりcutoffDateより後のデータを混入させないためには、
+  // 呼び出し側(jquants.js/cutoff.js)で事前にフィルタしておくことが必須であり、
+  // それが正しく行われていることは cutoff.js / jquants.js 側のテストで別途確認している。
+  const n = config.FEATURE_LOOKBACK_TRADING_DAYS + 1;
+  const dates = makeDateSeq(n);
+  const rows = dates.map((date, i) => ({ date, close: 1000 + i, volume: 1000 }));
+  const f = computeFeatures("X", rows);
+  assert.equal(f.dataAsOf, rows[rows.length - 1].date);
+});
+await test("computeFeatures: 計算結果にNaN/Infinityが含まれない", () => {
+  const n = config.FEATURE_LOOKBACK_TRADING_DAYS + 1;
+  const dates = makeDateSeq(n);
+  // 出来高0や価格が一定など、ゼロ割りが起きやすいエッジケースを含める
+  const rows = dates.map((date, i) => ({ date, close: 1000, volume: 0 }));
+  const f = computeFeatures("X", rows);
+  for (const [key, value] of Object.entries(f)) {
+    if (typeof value === "number") {
+      assert.ok(
+        Number.isFinite(value),
+        `${key} が NaN または Infinity になっている: ${value}`
+      );
+    }
+  }
+});
+
+console.log("[test] indicators.js");
+await test("sma: 期間未満はnull、十分あれば平均値を返す", () => {
+  assert.equal(sma([1, 2], 3), null);
+  assert.equal(sma([1, 2, 3, 4, 5], 5), 3);
+});
+await test("ema: 単調増加列で直近値に近い値を返す", () => {
+  const values = Array.from({ length: 30 }, (_, i) => 100 + i);
+  const result = ema(values, 12);
+  assert.ok(result > 100 && result < 130);
+});
+await test("rsi: 一貫して上昇し続ける場合は100に近い", () => {
+  const closes = Array.from({ length: 20 }, (_, i) => 100 + i);
+  const result = rsi(closes, 14);
+  assert.equal(result, 100); // 一度も下落していないため
+});
+await test("rsi: データ不足はnull", () => {
+  assert.equal(rsi([1, 2, 3], 14), null);
+});
+await test("macd: データ不足(35点未満)はnull", () => {
+  const closes = Array.from({ length: 30 }, (_, i) => 100 + i);
+  assert.equal(macd(closes), null);
+});
+await test("macd: 十分なデータがあれば値を返す", () => {
+  const closes = Array.from({ length: 41 }, (_, i) => 100 + i * 0.5);
+  const result = macd(closes);
+  assert.ok(result !== null);
+  assert.ok(typeof result.macd === "number");
+  assert.ok(typeof result.histogram === "number");
+});
+await test("bollingerBands: 一定値の系列では上下限=中央値", () => {
+  const closes = Array(20).fill(100);
+  const bb = bollingerBands(closes, 20, 2);
+  assert.equal(bb.upper, 100);
+  assert.equal(bb.lower, 100);
+  assert.equal(bb.middle, 100);
+});
+await test("atr: high/lowが無い場合は終値の変動幅で近似する", () => {
+  const rows = Array.from({ length: 15 }, (_, i) => ({ close: 100 + (i % 2 === 0 ? 1 : -1), high: null, low: null }));
+  const result = atr(rows, 14);
+  assert.ok(result !== null && result > 0);
 });
 
 console.log("[test] screening.js");
