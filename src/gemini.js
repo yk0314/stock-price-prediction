@@ -77,6 +77,7 @@ function buildGeminiInputData(feature) {
           ordinaryProfit: feature.financials.ordinaryProfit,
           profit: feature.financials.profit,
           eps: feature.financials.eps,
+          bps: feature.financials.bps,
           equityToAssetRatio: feature.financials.equityToAssetRatio,
         }
       : null,

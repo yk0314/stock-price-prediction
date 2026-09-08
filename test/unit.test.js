@@ -357,6 +357,30 @@ await test("normalizeFinancialRow: 標準的なキー名を正規化する", () 
   assert.equal(row.operatingProfit, 50000);
   assert.equal(row.profit, 30000);
 });
+await test("normalizeFinancialRow: 公式レスポンス形式(DisclosedDate/BookValuePerShare含む)を正規化する", () => {
+  // J-Quants /fins/statements の公式レスポンス例(https://jpx.gitbook.io/j-quants-ja)を参考にしたケース
+  const row = normalizeFinancialRow({
+    LocalCode: "86970",
+    Code: "8697",
+    DisclosedDate: "2023-04-27",
+    DisclosedTime: "12:00:00",
+    NetSales: "133991000000",
+    OperatingProfit: "68253000000",
+    OrdinaryProfit: "", // IFRS採用企業は空文字列になりうる
+    Profit: "46342000000",
+    EarningsPerShare: "88.03",
+    BookValuePerShare: "599.47",
+    EquityToAssetRatio: "0.004",
+  });
+  assert.equal(row.discDate, "2023-04-27");
+  assert.equal(row.netSales, 133991000000);
+  assert.equal(row.operatingProfit, 68253000000);
+  assert.equal(row.ordinaryProfit, null); // 空文字列は0ではなくnullになるべき
+  assert.equal(row.profit, 46342000000);
+  assert.equal(row.eps, 88.03);
+  assert.equal(row.bps, 599.47); // BPS取得の検証（財務データ検証で発見・追加した項目）
+  assert.equal(row.equityToAssetRatio, 0.004);
+});
 await test("normalizeFinancialRow: discDateが無ければnull", () => {
   assert.equal(normalizeFinancialRow({ Code: "72030" }), null);
 });

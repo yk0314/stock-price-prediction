@@ -16,6 +16,7 @@ const CANDIDATE_KEYS = {
   ordinaryProfit: ["OrdinaryProfit", "OrdinaryIncome"],
   profit: ["Profit", "NetIncome", "ProfitAttributableToOwnersOfParent"],
   eps: ["EarningsPerShare", "EPS", "BasicEarningsPerShare"],
+  bps: ["BookValuePerShare", "BPS"],
   equityToAssetRatio: ["EquityToAssetRatio", "EquityRatio"],
 };
 
@@ -57,6 +58,7 @@ export function normalizeFinancialRow(row) {
     ordinaryProfit: toNumberOrNull(pick(row, CANDIDATE_KEYS.ordinaryProfit)),
     profit: toNumberOrNull(pick(row, CANDIDATE_KEYS.profit)),
     eps: toNumberOrNull(pick(row, CANDIDATE_KEYS.eps)),
+    bps: toNumberOrNull(pick(row, CANDIDATE_KEYS.bps)),
     equityToAssetRatio: toNumberOrNull(pick(row, CANDIDATE_KEYS.equityToAssetRatio)),
   };
 }
