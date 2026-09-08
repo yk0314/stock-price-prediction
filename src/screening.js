@@ -1,6 +1,37 @@
 import { config } from "./config.js";
 
 /**
+ * モメンタム・出来高・市場相対強度・RSIの極端さを総合したスクリーニングスコアを計算する。
+ * 単純な「値動きの大きさ」だけで判断しないための複合指標。
+ * 重みは config.SCREENING.scoreWeights から取得し、後から容易に調整できる。
+ *
+ * このスコアはあくまでスクリーニング（Geminiに渡す前の絞り込み）専用であり、
+ * Geminiが返す最終的な "score" とは別物。
+ */
+export function computeScreeningScore(feature) {
+  const w = config.SCREENING.scoreWeights;
+  let score = 0;
+
+  if (feature.priceChange5d !== null && feature.priceChange5d !== undefined) {
+    score += w.momentum5d * Math.abs(feature.priceChange5d);
+  }
+  if (feature.priceChange20d !== null && feature.priceChange20d !== undefined) {
+    score += w.momentum20d * Math.abs(feature.priceChange20d);
+  }
+  if (feature.relativeStrength20d !== null && feature.relativeStrength20d !== undefined) {
+    score += w.relativeStrength * Math.abs(feature.relativeStrength20d);
+  }
+  if (feature.rsi14 !== null && feature.rsi14 !== undefined) {
+    score += w.rsiExtremity * Math.abs(feature.rsi14 - 50);
+  }
+  if (feature.volumeChange20d !== null && feature.volumeChange20d !== undefined) {
+    score += w.volumeChange * Math.abs(feature.volumeChange20d);
+  }
+
+  return score;
+}
+
+/**
  * 特徴量の配列から、まず「スクリーニングプール」を作る（数値だけでの絞り込み）。
  *
  * 重要: 「大きく動いた銘柄=上がりそうな銘柄」と決めつけないこと。
@@ -8,8 +39,9 @@ import { config } from "./config.js";
  * 上昇・下落どちらの値動きも対象に含める。最終判断はGeminiの分析結果と
  * 表示の両方を見てユーザーが行う。
  *
- * このロジックはPhase 1の仮実装であり、config.SCREENING を変更するか
- * この関数自体を差し替えるだけで、後から自由に条件を変更できる。
+ * モメンタム・出来高・市場相対強度・RSIの極端さを組み合わせた複合スコア
+ * (computeScreeningScore)でソートすることで、単純な値動きの大きさだけに
+ * 偏らないようにしている。
  *
  * @param {Array<object>} featureList - features.js の computeFeatures() の結果配列
  * @returns {Array<object>} スクリーニングプール（config.SCREENING.poolSize 件まで）
@@ -33,7 +65,7 @@ export function screenToPool(featureList) {
     return true;
   });
 
-  filtered.sort((a, b) => Math.abs(b.priceChange5d) - Math.abs(a.priceChange5d));
+  filtered.sort((a, b) => computeScreeningScore(b) - computeScreeningScore(a));
 
   return filtered.slice(0, poolSize);
 }

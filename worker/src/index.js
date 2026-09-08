@@ -60,6 +60,12 @@ export default {
         return jsonResponse(stocks ?? []);
       }
 
+      // GET /api/backtest — バックテスト評価サマリー（backtest-run.jsが生成、未実行ならnull相当）
+      if (path === "/api/backtest") {
+        const summary = await getJson(env.STOCK_KV, "backtest-summary");
+        return jsonResponse(summary ?? {});
+      }
+
       // GET /api/stocks/:code — 個別銘柄の基本情報（stocks一覧から検索）
       const stockMatch = path.match(/^\/api\/stocks\/([^/]+)$/);
       if (stockMatch) {

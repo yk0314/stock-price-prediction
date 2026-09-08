@@ -68,6 +68,8 @@ export function computeFeatures(code, rowsSortedAscFull) {
     priceChange20d: d20 ? pctChange(latest.close, d20.close) : null,
     volumeChange20d: avgVolume ? pctChange(latest.volume, avgVolume) : null,
     ...indicators,
+    // relativeStrength20d は市場(TOPIX)データと突き合わせた後にpipeline.js側で付与する
+    relativeStrength20d: null,
   };
 }
 

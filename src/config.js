@@ -40,12 +40,27 @@ export const config = {
 
   // --- 日付ベース一括取得の対象期間 ---
   // 「cutoffDateから何暦日遡って取得するか」。
+  // MACD(12,26,9)の計算に最低35営業日分必要なため、Phase 2-Aまでの20営業日から拡大した
+  // （Phase 2-Aでは新規リクエスト増加を避けるため据え置いていたが、今回は明示的に拡大する）。
   // 土日・祝日を含むため、実際の営業日数(FEATURE_LOOKBACK_TRADING_DAYS+1)より多めに設定する。
-  FETCH_LOOKBACK_CALENDAR_DAYS: 32,
-  // 特徴量の「Xd」比較で使う最大の営業日数（例: 20 なら 1d/5d/20d を計算する）。
-  // 実際にfeatures.jsが要求するデータ点数は「この値+1」（最新日を含めて20営業日前と比較するため）。
+  FETCH_LOOKBACK_CALENDAR_DAYS: 62,
+  // 特徴量の「Xd」比較・テクニカル指標の計算に使う最大の営業日数。
+  // 実際にfeatures.jsが要求するデータ点数は「この値+1」。
   // この日数分のデータが揃わない銘柄は特徴量計算をスキップする。
-  FEATURE_LOOKBACK_TRADING_DAYS: 20,
+  FEATURE_LOOKBACK_TRADING_DAYS: 40,
+
+  // --- 市場全体(TOPIX)データ ---
+  // 個別銘柄との相対強度を計算するために使う。専用エンドポイントで軽量に取得できる。
+  MARKET: {
+    relativeStrengthTradingDays: 20,
+  },
+
+  // --- 財務データ ---
+  FINANCIALS: {
+    // 銘柄コード指定で取得するため、対象はUNIVERSE_MODE="phase1_subset"の場合のみ有効にする
+    // （全銘柄対応は決算発表予定日APIでの絞り込みが必要。Phase 3以降の課題）。
+    enabled: true,
+  },
 
   // --- 数値スクリーニング ---
   SCREENING: {
@@ -57,6 +72,15 @@ export const config = {
     maxAbsVolumeChangePct: 500,
     // 価格変化率がこの範囲内の銘柄を「動きのある銘柄」として優先
     minAbsPriceChangePct5d: 1.0,
+    // 総合スコアの重み（モメンタム・出来高・市場相対強度・RSIの極端さを総合評価）。
+    // 単純な値動きの大きさだけで絞り込まないための重み付け。後から自由に調整できる。
+    scoreWeights: {
+      momentum5d: 1.0,
+      momentum20d: 0.5,
+      relativeStrength: 1.0,
+      rsiExtremity: 0.5,
+      volumeChange: 0.3,
+    },
   },
 
   // --- Gemini API 設定 ---
@@ -84,10 +108,17 @@ export const config = {
   // --- 最終ランキングに残す銘柄数 ---
   FINAL_RANKING_SIZE: 20,
 
-  // --- バックテスト用設定（Phase 1では評価は未実行。将来のevaluationスクリプト用） ---
+  // --- バックテスト用設定 ---
   BACKTEST: {
     horizonTradingDays: 30,
     hitThresholdPct: 5, // 30営業日後 +5% 以上で hit=true
+    scoreBands: [
+      [90, 100],
+      [80, 89],
+      [70, 79],
+      [60, 69],
+      [0, 59],
+    ],
   },
 
   // --- 中間データ(JSON)の保存先ディレクトリ ---

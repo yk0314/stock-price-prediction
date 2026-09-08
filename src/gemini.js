@@ -6,17 +6,41 @@ const PROBABILITY_DISCLAIMER =
   "upsideProbability/downsideRisk/confidenceは統計的に校正された確率ではなく、AIによる定性的な評価値です。";
 
 function buildPrompt(feature) {
-  // Geminiに渡すのは cutoffDate 以前のデータから計算した数値特徴量のみ。
-  // 未来の株価・ニュース等は一切渡さない（データリーク防止）。
+  // Geminiに渡すのは cutoffDate 以前のデータから計算した数値特徴量・財務情報・市場データのみ。
+  // 未来の株価・ニュース・未公開の決算情報等は一切渡さない（データリーク防止）。
+  const data = buildGeminiInputData(feature);
   return `あなたは日本株の銘柄評価を行うアシスタントです。
-以下の数値データだけをもとに、この銘柄が「上昇候補としてどの程度魅力的か」を評価してください。
-このデータは特定時点（cutoffDate = ${feature.cutoffDate ?? "不明"}）までの情報のみです。
-断定的な投資助言（「必ず上がる」等）はせず、あくまで傾向・リスクの定性的評価として答えてください。
+以下の数値データ（株価テクニカル指標・財務情報・市場全体との相対強度）だけをもとに、
+この銘柄が「今後30営業日程度で上昇する可能性がどの程度あるか」を評価してください。
+このデータは特定時点（cutoffDate = ${feature.cutoffDate ?? "不明"}）までに公開されていた情報のみです。
+あなたは株価を直接予言する魔法のモデルではありません。断定的な投資助言（「必ず上がる」等）はせず、
+あくまで傾向・リスクの定性的評価として答えてください。
 upsideProbability等は統計的に校正された確率ではなく、あなたの定性的な評価値として出力してください。
+financialsがnullの場合は、直近で開示されたデータが無い（または未検証のため取得できていない）ことを意味します。
 
 データ:
-${JSON.stringify(
-  {
+${JSON.stringify(data, null, 2)}
+
+以下のJSON形式で、JSON以外の文字を一切含めずに回答してください:
+{
+  "score": <0-100の総合スコア>,
+  "upsideProbability": <0-100の上昇期待度（定性評価）>,
+  "downsideRisk": <0-100の下落リスク（定性評価）>,
+  "stance": "positive" | "neutral" | "negative",
+  "reasoning": "<なぜその評価に至ったかの判断理由。2〜3文>",
+  "summary": "<日本語で1〜2文の要約>",
+  "positiveFactors": ["<ポジティブ要因>", ...],
+  "negativeFactors": ["<ネガティブ要因>", ...],
+  "confidence": <0-100の信頼度（定性評価）>
+}`;
+}
+
+/**
+ * Geminiに渡す入力データを整形する。null値も含めて明示的に渡すことで、
+ * 「データが無いこと」自体をGeminiが誤解しないようにする。
+ */
+function buildGeminiInputData(feature) {
+  return {
     code: feature.code,
     dataAsOf: feature.dataAsOf,
     price: feature.price,
@@ -24,7 +48,6 @@ ${JSON.stringify(
     priceChange5d: feature.priceChange5d,
     priceChange20d: feature.priceChange20d,
     volumeChange20d: feature.volumeChange20d,
-    // Phase 2-A: テクニカル指標を追加。データ不足の項目はnullのまま渡す。
     technicalIndicators: {
       sma5: feature.sma5,
       sma20: feature.sma20,
@@ -43,22 +66,21 @@ ${JSON.stringify(
       fromHigh20dPct: feature.fromHigh20dPct,
       fromLow20dPct: feature.fromLow20dPct,
     },
-  },
-  null,
-  2
-)}
-
-以下のJSON形式で、JSON以外の文字を一切含めずに回答してください:
-{
-  "score": <0-100の総合スコア>,
-  "upsideProbability": <0-100の上昇期待度（定性評価）>,
-  "downsideRisk": <0-100の下落リスク（定性評価）>,
-  "stance": "positive" | "neutral" | "negative",
-  "summary": "<日本語で1〜2文の要約>",
-  "positiveFactors": ["<ポジティブ要因>", ...],
-  "negativeFactors": ["<ネガティブ要因>", ...],
-  "confidence": <0-100の信頼度（定性評価）>
-}`;
+    marketRelative: {
+      relativeStrength20d: feature.relativeStrength20d,
+    },
+    financials: feature.financials
+      ? {
+          discDate: feature.financials.discDate,
+          netSales: feature.financials.netSales,
+          operatingProfit: feature.financials.operatingProfit,
+          ordinaryProfit: feature.financials.ordinaryProfit,
+          profit: feature.financials.profit,
+          eps: feature.financials.eps,
+          equityToAssetRatio: feature.financials.equityToAssetRatio,
+        }
+      : null,
+  };
 }
 
 /**
@@ -153,8 +175,12 @@ export async function analyzeWithGemini(apiKey, feature) {
       cutoffDate: feature.cutoffDate,
       dataAsOf: feature.dataAsOf,
       predictionExecutedAt: feature.predictionExecutedAt,
+      price: feature.price, // バックテスト評価(30営業日後との比較)の起点となる、予測時点の終値
       ...parsed,
       disclaimer: PROBABILITY_DISCLAIMER,
+      // 後から「どの時点で、どんな情報を使って、何を予測したのか」を完全に再現できるよう、
+      // Geminiに実際に渡した入力データをそのまま保存する。
+      usedFeatures: buildGeminiInputData(feature),
     };
   } catch (err) {
     console.warn(`[gemini] 呼び出し失敗 code=${feature.code}: ${err.message}`);

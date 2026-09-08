@@ -211,6 +211,52 @@ export class JQuantsClient {
   }
 
   /**
+   * TOPIXの日足データを期間指定(from/to)でまとめて取得する。
+   * 専用の軽量エンドポイントであり、株価のような日付ループは不要。
+   */
+  async fetchTopixRange(fromYYYYMMDD, toYYYYMMDD) {
+    return this._getAllPages("/indices/bars/daily/topix", {
+      from: fromYYYYMMDD,
+      to: toYYYYMMDD,
+    });
+  }
+
+  /**
+   * 指定した銘柄コードの財務情報を全期間分取得する（/v2/fins/summary, code指定）。
+   *
+   * 【重要・全銘柄対応時の注意】
+   * これは銘柄コードを1件ずつ指定して呼び出す方式であり、Phase 1で禁止した
+   * 「株価を1銘柄ずつループ取得する」のと同じ制約を持つ（銘柄数が多いと非現実的）。
+   * 財務情報は決算発表が年4回程度と頻度が低く、日付ベースの一括取得では
+   * 「いつ・どの銘柄が発表するか」が事前に分からず効率的に絞り込めないため、
+   * 現時点ではPhase 1と同じ少数の STOCK_UNIVERSE に対してのみ、
+   * 銘柄コード指定でこのメソッドを呼び出す設計にしている。
+   * 全銘柄対応する場合は、/v2/equities/earnings-calendar（決算発表予定日）で
+   * 対象日を事前に絞り込んでから日付ベースで取得する方式への切り替えが必要
+   * （Phase 3以降の課題としてREADMEに記載）。
+   */
+  async fetchFinancialsForCode(code) {
+    return this._getAllPages("/fins/summary", { code });
+  }
+
+  /**
+   * 指定した銘柄コードの株価四本値を、期間指定(from/to)で取得する。
+   *
+   * 【用途限定】これはバックテスト評価スクリプト専用のメソッドである。
+   * 評価対象は「過去に予測を行った、ごく少数の銘柄」に限られるため、
+   * 銘柄コードでループしても無料枠への影響は小さい
+   * （Phase 1で禁止した「全銘柄を1銘柄ずつループ取得する」設計とは用途が異なる）。
+   * 通常の予測パイプライン（pipeline.js）では使用しないこと。
+   */
+  async fetchDailyQuotesForCodeRange(code, fromYYYYMMDD, toYYYYMMDD) {
+    return this._getAllPages("/equities/bars/daily", {
+      code,
+      from: fromYYYYMMDD,
+      to: toYYYYMMDD,
+    });
+  }
+
+  /**
    * 上場銘柄一覧を取得する（全銘柄運用時、UNIVERSE_MODE="all" で使用する）。
    */
   async fetchListedInfo() {

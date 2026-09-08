@@ -7,7 +7,13 @@ import { resolveCutoffDate, isOnOrBeforeCutoff } from "../src/cutoff.js";
 import { normalizeRawRow, normalizeRawRows, groupByCode } from "../src/normalize.js";
 import { computeFeatures, computeFeaturesForAll } from "../src/features.js";
 import { sma, ema, rsi, macd, bollingerBands, atr } from "../src/indicators.js";
-import { screenToPool, selectGeminiCandidates } from "../src/screening.js";
+import { computeMarketFeatures, computeRelativeStrength } from "../src/market.js";
+import {
+  normalizeFinancialRow,
+  selectLatestAvailableFinancials,
+  buildAvailableFinancialsByCode,
+} from "../src/financials.js";
+import { screenToPool, selectGeminiCandidates, computeScreeningScore } from "../src/screening.js";
 import { evaluatePrediction, summarizeHitRateByScoreBand } from "../src/backtest.js";
 import { listCandidateDates, JQuantsClient, JQuantsApiError } from "../src/jquants.js";
 
@@ -213,16 +219,28 @@ await test("computeFeatures: 必要点数ぴったりあれば正しく計算さ
   assert.ok(Math.abs(f.priceChange20d - ((latest.close - d20.close) / d20.close) * 100) < 1e-9);
   assert.ok(Math.abs(f.priceChange5d - ((latest.close - d5.close) / d5.close) * 100) < 1e-9);
   assert.ok(Math.abs(f.priceChange1d - ((latest.close - d1.close) / d1.close) * 100) < 1e-9);
-  // データ点数が20+1=21点の場合に計算可能な指標（SMA20/RSI14/BB20は必要データ数を満たす）
+  // データ点数が config.FEATURE_LOOKBACK_TRADING_DAYS+1 点の場合に計算可能な指標
+  // （SMA20/RSI14/BB20は必要データ数20〜21を常に満たす）
   assert.ok(f.sma20 !== null);
   assert.ok(f.rsi14 !== null);
   assert.ok(f.bbUpper !== null);
   assert.ok(!Number.isNaN(f.sma20) && Number.isFinite(f.sma20));
-  // MACD(12,26,9)は最低35点必要なため、21点しか無いこの設定ではnullになるのが正しい
-  // （無理に値を入れず、データ不足を明示するという要求どおりの挙動）
-  assert.equal(f.macd, null);
-  assert.equal(f.macdSignal, null);
-  assert.equal(f.ema26, null); // EMA26も26点必要なため同様にnull
+  // MACD(12,26,9)は最低35点、EMA26は最低26点必要。
+  // 現在の設定(config.FEATURE_LOOKBACK_TRADING_DAYS+1点)がそれを満たすかどうかで期待値を動的に判定する
+  // （設定値が将来変わってもテストが追従できるようにするため）。
+  const totalPoints = config.FEATURE_LOOKBACK_TRADING_DAYS + 1;
+  if (totalPoints >= 35) {
+    assert.ok(f.macd !== null, `${totalPoints}点あるためMACDは計算されるはず`);
+    assert.ok(f.macdSignal !== null);
+  } else {
+    assert.equal(f.macd, null, `${totalPoints}点しかないためMACDはnullのはず`);
+    assert.equal(f.macdSignal, null);
+  }
+  if (totalPoints >= 26) {
+    assert.ok(f.ema26 !== null, `${totalPoints}点あるためEMA26は計算されるはず`);
+  } else {
+    assert.equal(f.ema26, null, `${totalPoints}点しかないためEMA26はnullのはず`);
+  }
 });
 await test("computeFeaturesForAll: Mapを渡すと配列で返る", () => {
   const n = config.FEATURE_LOOKBACK_TRADING_DAYS + 1;
@@ -301,6 +319,84 @@ await test("atr: high/lowが無い場合は終値の変動幅で近似する", (
   const rows = Array.from({ length: 15 }, (_, i) => ({ close: 100 + (i % 2 === 0 ? 1 : -1), high: null, low: null }));
   const result = atr(rows, 14);
   assert.ok(result !== null && result > 0);
+});
+
+console.log("[test] market.js");
+await test("computeMarketFeatures: データ不足はnull", () => {
+  const rows = [{ date: "2026-06-01", close: 2000 }];
+  const result = computeMarketFeatures(rows, 20);
+  assert.equal(result.topixChangeNd, null);
+});
+await test("computeMarketFeatures: 20営業日騰落率を計算する", () => {
+  const rows = Array.from({ length: 21 }, (_, i) => ({
+    date: `d${i}`,
+    close: 2000 + i * 10,
+  }));
+  const result = computeMarketFeatures(rows, 20);
+  assert.ok(Math.abs(result.topixChangeNd - ((2200 - 2000) / 2000) * 100) < 1e-9);
+});
+await test("computeRelativeStrength: 銘柄がTOPIXをアウトパフォームしていれば正の値", () => {
+  assert.equal(computeRelativeStrength(15, 5), 10);
+  assert.equal(computeRelativeStrength(null, 5), null);
+  assert.equal(computeRelativeStrength(15, null), null);
+});
+
+console.log("[test] financials.js");
+await test("normalizeFinancialRow: 標準的なキー名を正規化する", () => {
+  const row = normalizeFinancialRow({
+    Code: "72030",
+    DiscDate: "2026-05-13",
+    DiscTime: "15:00",
+    NetSales: "1000000",
+    OperatingProfit: "50000",
+    Profit: "30000",
+  });
+  assert.equal(row.code, "72030");
+  assert.equal(row.discDate, "2026-05-13");
+  assert.equal(row.netSales, 1000000);
+  assert.equal(row.operatingProfit, 50000);
+  assert.equal(row.profit, 30000);
+});
+await test("normalizeFinancialRow: discDateが無ければnull", () => {
+  assert.equal(normalizeFinancialRow({ Code: "72030" }), null);
+});
+await test("selectLatestAvailableFinancials: cutoffDate以降(同日含む)の開示は除外する", () => {
+  const rows = [
+    normalizeFinancialRow({ Code: "1", DiscDate: "2026-05-01", NetSales: "100" }),
+    normalizeFinancialRow({ Code: "1", DiscDate: "2026-06-01", NetSales: "200" }), // cutoffDate当日 → 除外
+    normalizeFinancialRow({ Code: "1", DiscDate: "2026-06-02", NetSales: "300" }), // cutoffDateより後 → 除外
+  ];
+  const latest = selectLatestAvailableFinancials(rows, "2026-06-01");
+  assert.equal(latest.netSales, 100);
+});
+await test("selectLatestAvailableFinancials: 利用可能な開示が無ければnull", () => {
+  const rows = [normalizeFinancialRow({ Code: "1", DiscDate: "2026-07-01", NetSales: "100" })];
+  assert.equal(selectLatestAvailableFinancials(rows, "2026-06-01"), null);
+});
+await test("buildAvailableFinancialsByCode: 銘柄コードごとに最新の利用可能開示を選ぶ", () => {
+  const rawByCode = new Map([
+    ["1", [
+      { Code: "1", DiscDate: "2026-03-01", NetSales: "100" },
+      { Code: "1", DiscDate: "2026-06-01", NetSales: "200" }, // cutoff当日なので除外されるはず
+    ]],
+  ]);
+  const result = buildAvailableFinancialsByCode(rawByCode, "2026-06-01");
+  assert.equal(result.get("1").netSales, 100);
+});
+
+console.log("[test] screening.js (computeScreeningScore)");
+await test("computeScreeningScore: モメンタム・相対強度・RSIを合成する", () => {
+  const feature = {
+    priceChange5d: 5,
+    priceChange20d: 10,
+    relativeStrength20d: 3,
+    rsi14: 70,
+    volumeChange20d: 20,
+  };
+  const w = config.SCREENING.scoreWeights;
+  const expected =
+    w.momentum5d * 5 + w.momentum20d * 10 + w.relativeStrength * 3 + w.rsiExtremity * 20 + w.volumeChange * 20;
+  assert.ok(Math.abs(computeScreeningScore(feature) - expected) < 1e-9);
 });
 
 console.log("[test] screening.js");

@@ -7,6 +7,8 @@ import { screenToPool, selectGeminiCandidates } from "./screening.js";
 import { analyzeCandidates } from "./gemini.js";
 import { CloudflareKV, saveResultsToKV } from "./kv.js";
 import { writeArtifact } from "./artifacts.js";
+import { fetchTopixForRange, computeMarketFeatures, computeRelativeStrength } from "./market.js";
+import { buildAvailableFinancialsByCode } from "./financials.js";
 
 function addDaysUTC(dateStr, days) {
   const d = new Date(dateStr + "T00:00:00Z");
@@ -85,12 +87,64 @@ async function main() {
   // --- Stage 3: features — 特徴量計算（対象は grouped = フィルタ後のユニバース） ---
   const featureList = computeFeaturesForAll(grouped);
   console.log(`[pipeline] features: ${featureList.length}銘柄で計算成功`);
-  await writeArtifact("features.json", featureList);
 
   if (featureList.length === 0) {
+    await writeArtifact("features.json", featureList);
     console.error("[pipeline] 特徴量が1件も計算できませんでした。処理を中断します。");
     process.exitCode = 1;
     return;
+  }
+
+  // --- Stage 3.5: 市場データ(TOPIX) — 専用の軽量エンドポイントで取得し、相対強度を計算 ---
+  // 日付ループではなくfrom/to範囲指定の1回（〜数回のページング）で取得できるため、
+  // 無料枠への影響はごく小さい。
+  const relativeStrengthDays = config.MARKET.relativeStrengthTradingDays;
+  let topixChangeNd = null;
+  try {
+    const topixRows = await fetchTopixForRange(jquants, fetchStartDate, cutoffDate, cutoffDate);
+    const marketFeatures = computeMarketFeatures(topixRows, relativeStrengthDays);
+    topixChangeNd = marketFeatures.topixChangeNd;
+    console.log(
+      `[pipeline] market(TOPIX): ${topixRows.length}件取得 / ${relativeStrengthDays}営業日騰落率=${topixChangeNd}`
+    );
+  } catch (err) {
+    // 市場データは補助的な特徴量であり、取得できなくてもパイプライン全体は継続できるようにする
+    // （財務・株価と異なりTOPIXが無くても既存の特徴量だけで分析は成立するため）。
+    console.warn(`[pipeline] TOPIX取得に失敗したため、relativeStrengthはnullのまま続行: ${err.message}`);
+  }
+  for (const f of featureList) {
+    f.relativeStrength20d = computeRelativeStrength(f.priceChange20d, topixChangeNd);
+  }
+  await writeArtifact("features.json", featureList);
+
+  // --- Stage 3.6: 財務データ — STOCK_UNIVERSE銘柄のみ、銘柄コード指定で取得（全銘柄対応は将来課題） ---
+  // 開示日(discDate)がcutoffDateより厳密に前のものだけを採用し、未来情報の混入を防ぐ。
+  const financialsByCode = new Map();
+  if (config.FINANCIALS.enabled && config.UNIVERSE_MODE === "phase1_subset") {
+    const rawFinancialsByCode = new Map();
+    for (const code of config.STOCK_UNIVERSE) {
+      try {
+        const rows = await jquants.fetchFinancialsForCode(code);
+        rawFinancialsByCode.set(code, rows);
+      } catch (err) {
+        // 財務データはあくまで補助的な特徴量。1銘柄の取得失敗でパイプライン全体を止めない。
+        console.warn(`[pipeline] 財務情報取得に失敗 code=${code}: ${err.message}`);
+        rawFinancialsByCode.set(code, []);
+      }
+    }
+    const available = buildAvailableFinancialsByCode(rawFinancialsByCode, cutoffDate);
+    for (const [code, fin] of available.entries()) {
+      financialsByCode.set(code, fin);
+    }
+    console.log(
+      `[pipeline] financials: ${config.STOCK_UNIVERSE.length}銘柄中 ${available.size}銘柄で利用可能な開示情報あり`
+    );
+    await writeArtifact("financials.json", Object.fromEntries(available));
+  } else {
+    console.log("[pipeline] financials: UNIVERSE_MODEが'all'のため今回はスキップ（Phase3以降の課題）");
+  }
+  for (const f of featureList) {
+    f.financials = financialsByCode.get(f.code) ?? null;
   }
 
   // --- Stage 4: screened — 数値スクリーニングでプールを作成 → Gemini対象を選定 ---
@@ -131,7 +185,8 @@ async function main() {
   }));
   const pricesByCode = {};
   for (const [code, rows] of grouped.entries()) {
-    pricesByCode[code] = rows.slice(-config.FEATURE_LOOKBACK_TRADING_DAYS);
+    // features.js が実際に参照するウィンドウ（最新+N営業日前まで）と一致させる
+    pricesByCode[code] = rows.slice(-(config.FEATURE_LOOKBACK_TRADING_DAYS + 1));
   }
 
   const finishedAt = new Date();
@@ -147,6 +202,8 @@ async function main() {
     poolCount: pool.length,
     geminiCandidateCount: geminiCandidates.length,
     analyzedCount: analysisResults.length,
+    topixChangeNd,
+    financialsAvailableCount: financialsByCode.size,
   };
 
   // --- Stage 7: Cloudflare KV へ保存（表示用データ + バックテスト用の追記履歴） ---
