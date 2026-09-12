@@ -357,8 +357,8 @@ await test("normalizeFinancialRow: 標準的なキー名を正規化する", () 
   assert.equal(row.operatingProfit, 50000);
   assert.equal(row.profit, 30000);
 });
-await test("normalizeFinancialRow: 公式レスポンス形式(DisclosedDate/BookValuePerShare含む)を正規化する", () => {
-  // J-Quants /fins/statements の公式レスポンス例(https://jpx.gitbook.io/j-quants-ja)を参考にしたケース
+await test("normalizeFinancialRow: フォールバック用のV1形式キー名でも正規化できる", () => {
+  // 実際のV2 APIでは使われないが、候補に残してあるV1形式のキー名でも動くことの確認
   const row = normalizeFinancialRow({
     LocalCode: "86970",
     Code: "8697",
@@ -378,8 +378,49 @@ await test("normalizeFinancialRow: 公式レスポンス形式(DisclosedDate/Boo
   assert.equal(row.ordinaryProfit, null); // 空文字列は0ではなくnullになるべき
   assert.equal(row.profit, 46342000000);
   assert.equal(row.eps, 88.03);
-  assert.equal(row.bps, 599.47); // BPS取得の検証（財務データ検証で発見・追加した項目）
+  assert.equal(row.bps, 599.47);
   assert.equal(row.equityToAssetRatio, 0.004);
+});
+await test("normalizeFinancialRow: 実際のJ-Quants V2レスポンス形式(短縮キー名)を正規化する", () => {
+  // 2026-09、信越化学工業(4063)の実データで確認した本物のレスポンス形式
+  const row = normalizeFinancialRow({
+    DiscDate: "2024-07-26",
+    DiscTime: "15:00:00",
+    Code: "40630",
+    DocType: "1QFinancialStatements_Consolidated_JP",
+    Sales: "597930000000",
+    OP: "191023000000",
+    OdP: "219810000000",
+    NP: "144021000000",
+    EPS: "72.21",
+    BPS: "2234.22",
+    EqAR: "0.836",
+  });
+  assert.equal(row.code, "40630");
+  assert.equal(row.discDate, "2024-07-26");
+  assert.equal(row.netSales, 597930000000);
+  assert.equal(row.operatingProfit, 191023000000); // OPキーが正しく拾えているかの検証（今回の修正の核心）
+  assert.equal(row.ordinaryProfit, 219810000000); // OdPキー
+  assert.equal(row.profit, 144021000000); // NPキー
+  assert.equal(row.eps, 72.21);
+  assert.equal(row.bps, 2234.22);
+  assert.equal(row.equityToAssetRatio, 0.836); // EqARキー
+});
+await test("normalizeFinancialRow: 実データ形式で空文字列項目(配当等)はnullとして無視される", () => {
+  const row = normalizeFinancialRow({
+    DiscDate: "2024-07-26",
+    Code: "40630",
+    Sales: "597930000000",
+    OP: "191023000000",
+    OdP: "219810000000",
+    NP: "144021000000",
+    EPS: "72.21",
+    BPS: "2234.22",
+    EqAR: "0.836",
+    Div1Q: "", // 未使用フィールド。正規化対象外だが、影響が無いことを確認
+  });
+  assert.equal(row.operatingProfit, 191023000000);
+  assert.ok(!Number.isNaN(row.operatingProfit));
 });
 await test("normalizeFinancialRow: discDateが無ければnull", () => {
   assert.equal(normalizeFinancialRow({ Code: "72030" }), null);

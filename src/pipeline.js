@@ -140,10 +140,6 @@ async function main() {
       `[pipeline] financials: ${config.STOCK_UNIVERSE.length}銘柄中 ${available.size}銘柄で利用可能な開示情報あり`
     );
     await writeArtifact("financials.json", Object.fromEntries(available));
-    // 【財務データ検証用の一時計測】正規化前の生レスポンスをそのまま保存する。
-    // operatingProfit等が不自然にnullになる問題の原因（V2でのフィールド名相違の可能性）を
-    // 特定するための診断目的。問題が解消し次第この行は削除してよい。
-    await writeArtifact("financials-raw.json", Object.fromEntries(rawFinancialsByCode));
   } else {
     console.log("[pipeline] financials: UNIVERSE_MODEが'all'のため今回はスキップ（Phase3以降の課題）");
   }

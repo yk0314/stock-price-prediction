@@ -1,23 +1,27 @@
-// J-Quants /v2/fins/summary のレスポンスは、EDINET XBRLタクソノミの
-// 「冗長ラベル（英語）」をキーとするため、正式なキー名は実際のレスポンスで
-// 確認・調整が必要（現時点では公式ドキュメントで全項目が確認できていない）。
-// 【要検証】実際に取得したレスポンスの生データをdata/financials.jsonで
-// 確認し、下記 CANDIDATE_KEYS を実際のキー名に合わせて調整すること。
-//
-// 開示日(DiscDate)・開示時刻(DiscTime)は/v2/fins/detailsで確認できた項目名を
-// 採用している（/fins/summaryも同様の命名規則と推測されるが、これも要検証）。
+// J-Quants V2 /fins/summary のフィールド名は【2026-09、実データで検証済み】。
+// EDINET XBRLの冗長ラベルではなく、独自の超短縮キー名が使われている。
+// 実際のレスポンス例（信越化学工業 4063, 1Q決算）:
+//   { DiscDate, DiscTime, Code, DocType, CurPerType, Sales, OP, OdP, NP,
+//     EPS, DEPS, TA, Eq, EqAR, BPS, ROE, ... }
+// Sales=売上高, OP=営業利益, OdP=経常利益, NP=純利益, EqAR=自己資本比率
+// 空文字列("")は「その決算区分では算出されない項目」を意味し、0ではなくnullとして扱う
+// （例: IFRS採用企業のOdPは常に空文字列）。
 
 const CANDIDATE_KEYS = {
   code: ["Code", "code"],
   discDate: ["DiscDate", "DisclosedDate", "disclosedDate"],
   discTime: ["DiscTime", "DisclosedTime", "disclosedTime"],
-  netSales: ["NetSales", "Sales", "OperatingRevenue", "TotalNetRevenues"],
-  operatingProfit: ["OperatingProfit", "OperatingIncome"],
-  ordinaryProfit: ["OrdinaryProfit", "OrdinaryIncome"],
-  profit: ["Profit", "NetIncome", "ProfitAttributableToOwnersOfParent"],
-  eps: ["EarningsPerShare", "EPS", "BasicEarningsPerShare"],
-  bps: ["BookValuePerShare", "BPS"],
-  equityToAssetRatio: ["EquityToAssetRatio", "EquityRatio"],
+  // 【2026-09実データ検証で判明】J-Quants V2 /fins/summary は独自の超短縮キー名を使用する
+  // （V1の /fins/statements とは全く異なる）。実際のレスポンス例:
+  // Sales, OP(営業利益), OdP(経常利益), NP(純利益), EPS, BPS, EqAR(自己資本比率) 等。
+  // 一般的なV1形式のキー名も念のため候補に残しているが、実際にヒットするのは短縮形の方。
+  netSales: ["Sales", "NetSales", "OperatingRevenue", "TotalNetRevenues"],
+  operatingProfit: ["OP", "OperatingProfit", "OperatingIncome"],
+  ordinaryProfit: ["OdP", "OrdinaryProfit", "OrdinaryIncome"],
+  profit: ["NP", "Profit", "NetIncome", "ProfitAttributableToOwnersOfParent"],
+  eps: ["EPS", "EarningsPerShare", "BasicEarningsPerShare"],
+  bps: ["BPS", "BookValuePerShare"],
+  equityToAssetRatio: ["EqAR", "EquityToAssetRatio", "EquityRatio"],
 };
 
 function pick(row, keys) {
