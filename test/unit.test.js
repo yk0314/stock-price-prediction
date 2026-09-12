@@ -15,6 +15,12 @@ import {
 } from "../src/financials.js";
 import { screenToPool, selectGeminiCandidates, computeScreeningScore } from "../src/screening.js";
 import { evaluatePrediction, summarizeHitRateByScoreBand } from "../src/backtest.js";
+import {
+  pearsonCorrelation,
+  computeQuantileBands,
+  summarizeByBand,
+  topNByDate,
+} from "../src/analysis.js";
 import { listCandidateDates, JQuantsClient, JQuantsApiError } from "../src/jquants.js";
 
 let passed = 0;
@@ -518,6 +524,62 @@ await test("summarizeHitRateByScoreBand: スコア帯ごとの的中率を集計
   assert.equal(summary[0].hitRate, 50);
   assert.equal(summary[1].count, 1);
   assert.equal(summary[1].hitRate, 100);
+});
+
+console.log("[test] analysis.js");
+await test("pearsonCorrelation: 完全な正の相関で1になる", () => {
+  const xs = [1, 2, 3, 4, 5];
+  const ys = [2, 4, 6, 8, 10];
+  assert.ok(Math.abs(pearsonCorrelation(xs, ys) - 1) < 1e-9);
+});
+await test("pearsonCorrelation: 完全な負の相関で-1になる", () => {
+  const xs = [1, 2, 3, 4, 5];
+  const ys = [10, 8, 6, 4, 2];
+  assert.ok(Math.abs(pearsonCorrelation(xs, ys) - -1) < 1e-9);
+});
+await test("pearsonCorrelation: 無関係な場合は0に近い", () => {
+  const xs = [1, 2, 3, 4, 5, 6];
+  const ys = [3, 1, 4, 1, 5, 9]; // ランダムに近い並び
+  const r = pearsonCorrelation(xs, ys);
+  assert.ok(r !== null && Math.abs(r) < 1);
+});
+await test("pearsonCorrelation: サンプル数不足はnull", () => {
+  assert.equal(pearsonCorrelation([1, 2], [1, 2]), null);
+});
+await test("computeQuantileBands: 指定した数のバンドに分割する", () => {
+  const scores = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+  const bands = computeQuantileBands(scores, 2);
+  assert.equal(bands.length, 2);
+  assert.ok(bands[0][0] <= bands[0][1]);
+  assert.ok(bands[1][0] <= bands[1][1]);
+});
+await test("summarizeByBand: バンドごとにhit率・平均/中央値リターンを集計する", () => {
+  const samples = [
+    { score: 10, futureReturn30d: 10, hit: true },
+    { score: 12, futureReturn30d: -5, hit: false },
+    { score: 1, futureReturn30d: 2, hit: false },
+  ];
+  const bands = [
+    [10, 20],
+    [0, 9],
+  ];
+  const summary = summarizeByBand(samples, bands);
+  assert.equal(summary[0].count, 2);
+  assert.equal(summary[0].hitRatePct, 50);
+  assert.equal(summary[0].avgReturnPct, 2.5);
+  assert.equal(summary[1].count, 1);
+  assert.equal(summary[1].avgReturnPct, 2);
+});
+await test("topNByDate: 日付ごとにスコア上位N件の平均リターンを計算する", () => {
+  const samples = [
+    { code: "A", cutoffDate: "2026-01-01", score: 10, futureReturn30d: 5 },
+    { code: "B", cutoffDate: "2026-01-01", score: 5, futureReturn30d: -5 },
+    { code: "C", cutoffDate: "2026-01-01", score: 20, futureReturn30d: 15 },
+  ];
+  const result = topNByDate(samples, [1, 2]);
+  assert.deepEqual(result["2026-01-01"].top1.codes, ["C"]);
+  assert.equal(result["2026-01-01"].top1.avgReturnPct, 15);
+  assert.equal(result["2026-01-01"].top2.avgReturnPct, 10); // (15+5)/2
 });
 
 console.log(`\n[test] ${passed}件成功`);

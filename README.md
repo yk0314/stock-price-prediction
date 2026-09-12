@@ -174,3 +174,23 @@ node src/pipeline.js  # パイプライン本体（要: 環境変数 / Secrets�
 ### 8-3. 今後追加予定の投資管理機能との干渉回避
 
 KVキーの命名は`meta` `ranking` `stocks` `analysis:` `prices:` `history:` `backtest-summary`を使用済みです。将来の売買履歴機能は`trade:`等の別プレフィックスを使う想定で、現時点では実装していません。
+
+## 9. スクリーニングスコアの妥当性検証
+
+`src/screening-backtest.js`（+ `.github/workflows/screening-backtest.yml`、手動実行専用）で、`computeScreeningScore()`が過去データに対して実際に意味のある順位付けをしているかを検証できます。
+
+**重要**: このスクリプトはGeminiを一切呼び出しません（無料枠消費ゼロ）。J-Quantsのみ使用し、`STOCK_UNIVERSE`の各銘柄について`from/to`範囲指定の1リクエストで全期間データを取得し、複数のcutoffDateについてはメモリ上でスライスして再利用します（cutoffDateを増やしてもリクエスト数は増えません）。
+
+### 実行方法
+
+```bash
+node src/screening-backtest.js
+```
+
+`CUTOFF_DATES`環境変数（カンマ区切り）でcutoffDateを上書きできます。デフォルトは2025-09〜2026-04の5時点です。結果は`data/screening-validation.json`に保存され、コンソールにも出力されます。
+
+### コード解析で判明した設計上の注意点（実データ検証前の所見）
+
+`computeScreeningScore()`は全項目に`Math.abs()`を使っており、**「大きく動いた銘柄（方向不問）」を検出するスコアであり、「上昇しそうな銘柄」を予測するスコアではありません**（`screenToPool()`のコメントに明記された意図的な設計）。そのため、このスコアと将来の株価上昇の間に強い相関がないこと自体は、バグではなく設計上自然な結果である可能性があります。実データでの検証結果を踏まえて判断してください。
+
+また、TOPIX相対強度（ウェイト1.0）はFreeプランで常にnullのため常に0点になり、重み総和のうち約30%が現在は機能していません（全銘柄に一律の影響のため、現在の10銘柄内での相対順位は歪めていません）。

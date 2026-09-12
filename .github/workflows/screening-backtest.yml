@@ -1,0 +1,42 @@
+name: JP Stock Screening Score Validation
+
+on:
+  # Geminiを使わない純粋な数値検証のため、手動実行のみ。自動実行は追加しない。
+  workflow_dispatch:
+    inputs:
+      cutoffDates:
+        description: "検証に使うcutoffDateをカンマ区切りで指定（省略時はデフォルトの5時点）"
+        required: false
+        default: ""
+
+jobs:
+  run-screening-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node.js セットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 単体テスト実行
+        run: node test/unit.test.js
+
+      - name: スクリーニングスコア検証バックテスト実行
+        env:
+          # J-Quantsのみ使用。Gemini/Cloudflareの認証情報は不要（このワークフローでは一切使わない）。
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+          CUTOFF_DATES: ${{ inputs.cutoffDates }}
+        run: node src/screening-backtest.js
+
+      - name: 分析結果(data/)をartifactとしてアップロード
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screening-validation-${{ github.run_id }}
+          path: data/
+          retention-days: 30
+          if-no-files-found: ignore
