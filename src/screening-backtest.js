@@ -42,7 +42,7 @@ const DEFAULT_CUTOFF_DATES = [
   "2025-11-03",
   "2026-01-05",
   "2026-03-02",
-  "2026-04-30",
+  "2026-04-15",
 ];
 
 function addDaysUTC(dateStr, days) {
@@ -64,11 +64,16 @@ async function main() {
   const jquants = new JQuantsClient(process.env.JQUANTS_API_KEY);
 
   // 最も古いcutoffDateの特徴量計算に必要な期間(FETCH_LOOKBACK_CALENDAR_DAYS)を遡った日付から、
-  // 今日（＝最新cutoffDateの30営業日後の評価に使える）までを1回で取得する。
+  // 「今日」ではなく「J-Quants Freeプランが実際にデータを提供する上限（今日から約90日前）」までを取得する。
+  // 【実データで判明】"to"に今日の日付をそのまま指定すると、Freeプランのデータ提供期間を
+  // 超えているとして400エラーになる（実際の提供上限は今日から約84日前だった。安全マージンを見て90日前を使う）。
   const earliestNeeded = addDaysUTC(cutoffDates[0], -config.FETCH_LOOKBACK_CALENDAR_DAYS);
-  const today = new Date().toISOString().slice(0, 10);
+  const latestAvailable = addDaysUTC(
+    new Date().toISOString().slice(0, 10),
+    -config.JQUANTS_DELAY_DAYS
+  );
 
-  console.log(`[screening-backtest] 取得期間: ${earliestNeeded} 〜 ${today}（銘柄ごとに1リクエスト）`);
+  console.log(`[screening-backtest] 取得期間: ${earliestNeeded} 〜 ${latestAvailable}（銘柄ごとに1リクエスト）`);
 
   const seriesByCode = new Map();
   for (const code of config.STOCK_UNIVERSE) {
@@ -76,7 +81,7 @@ async function main() {
       const rawRows = await jquants.fetchDailyQuotesForCodeRange(
         code,
         earliestNeeded.replaceAll("-", ""),
-        today.replaceAll("-", "")
+        latestAvailable.replaceAll("-", "")
       );
       const normalized = normalizeRawRows(rawRows).filter((r) => r.code === code);
       const rows = groupByCode(normalized).get(code) || [];
