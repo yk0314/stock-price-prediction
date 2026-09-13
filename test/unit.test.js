@@ -173,6 +173,24 @@ await test("正規化: 短縮カラム名(V2想定)", () => {
 await test("正規化: 必須項目欠損時はnull", () => {
   assert.equal(normalizeRawRow({ Code: "72030" }), null);
 });
+await test("正規化: AdjustmentCloseが存在する場合は生のCloseより優先される（株式分割対策）", () => {
+  // 実データ検証で発覚: 生のCloseを使うと株式分割銘柄でpriceChange5d/20dが
+  // 「-70%」のようなあり得ない値になっていた。分割調整後の値を優先することを保証する。
+  const row = normalizeRawRow({
+    Code: "99840",
+    Date: "20260105",
+    Close: 500, // 分割前後で不連続な生の終値（想定）
+    AdjustmentClose: 2000, // 分割調整後の連続的な終値
+    Volume: 1000000,
+    AdjustmentVolume: 250000,
+  });
+  assert.equal(row.close, 2000);
+  assert.equal(row.volume, 250000);
+});
+await test("正規化: AdjustmentCloseが無ければ生のCloseにフォールバックする", () => {
+  const row = normalizeRawRow({ Code: "72030", Date: "20260601", Close: 1234.5, Volume: 100000 });
+  assert.equal(row.close, 1234.5);
+});
 await test("groupByCode: 銘柄ごとにグルーピングし日付昇順にソートする", () => {
   const rows = normalizeRawRows([
     { Code: "10000", Date: "20260103", Close: 3, Volume: 10 },

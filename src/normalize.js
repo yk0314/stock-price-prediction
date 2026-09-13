@@ -8,14 +8,20 @@
 // 5桁目が"0"の場合は普通株式を表すため、末尾の"0"を取り除いて4桁化する。
 // 5桁目が"0"以外（優先株式・新株予約権等、英字を含む場合もある）の場合は、
 // 別銘柄を表すため4桁化せずそのまま保持する。
+//
+// 【2026-09、スクリーニングスコア妥当性検証で判明】終値・出来高は
+// 株式分割調整後の値(AdjustmentClose等)を優先して使うこと。生の終値(Close)を
+// 優先していたため、分割のあった銘柄(実データでは9984で確認)でpriceChange5d/20d等が
+// 「-70%」のようなあり得ない値になり、スクリーニングスコア・特徴量全体を汚染していた。
+// 分割調整後の値は連続的な時系列になるため、必ずこちらを優先する。
 
 const CANDIDATE_KEYS = {
   date: ["Date", "date", "D"],
   code: ["Code", "code", "LocalCode"],
-  close: ["Close", "close", "C", "AdjustmentClose", "AdjClose"],
-  high: ["High", "high", "H", "AdjustmentHigh", "AdjHigh"],
-  low: ["Low", "low", "L", "AdjustmentLow", "AdjLow"],
-  volume: ["Volume", "volume", "Vo", "AdjustmentVolume", "AdjVolume"],
+  close: ["AdjustmentClose", "AdjClose", "Close", "close", "C"],
+  high: ["AdjustmentHigh", "AdjHigh", "High", "high", "H"],
+  low: ["AdjustmentLow", "AdjLow", "Low", "low", "L"],
+  volume: ["AdjustmentVolume", "AdjVolume", "Volume", "volume", "Vo"],
 };
 
 function pick(row, keys) {
