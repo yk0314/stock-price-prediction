@@ -9,19 +9,20 @@
 // 5桁目が"0"以外（優先株式・新株予約権等、英字を含む場合もある）の場合は、
 // 別銘柄を表すため4桁化せずそのまま保持する。
 //
-// 【2026-09、スクリーニングスコア妥当性検証で判明】終値・出来高は
-// 株式分割調整後の値(AdjustmentClose等)を優先して使うこと。生の終値(Close)を
-// 優先していたため、分割のあった銘柄(実データでは9984で確認)でpriceChange5d/20d等が
-// 「-70%」のようなあり得ない値になり、スクリーニングスコア・特徴量全体を汚染していた。
-// 分割調整後の値は連続的な時系列になるため、必ずこちらを優先する。
+// 【2026-09、実データで確定】J-Quants V2の株価API(/equities/bars/daily)は
+// 生の四本値(O,H,L,C)と、株式分割調整後の四本値(AdjO,AdjH,AdjL,AdjC)を
+// 超短縮キー名で別々に返す（AdjustmentClose等の長い名前ではない）。
+// 実データで9984(ソフトバンクグループ)の2025-12-29に4分割(AdjFactor:0.25)を確認し、
+// 生のCloseだと前日比-75%という不連続な値になる一方、AdjCは連続していることを確認済み。
+// 必ずAdj*系（分割調整後）を優先して使うこと。
 
 const CANDIDATE_KEYS = {
   date: ["Date", "date", "D"],
   code: ["Code", "code", "LocalCode"],
-  close: ["AdjustmentClose", "AdjClose", "Close", "close", "C"],
-  high: ["AdjustmentHigh", "AdjHigh", "High", "high", "H"],
-  low: ["AdjustmentLow", "AdjLow", "Low", "low", "L"],
-  volume: ["AdjustmentVolume", "AdjVolume", "Volume", "volume", "Vo"],
+  close: ["AdjC", "AdjustmentClose", "AdjClose", "Close", "close", "C"],
+  high: ["AdjH", "AdjustmentHigh", "AdjHigh", "High", "high", "H"],
+  low: ["AdjL", "AdjustmentLow", "AdjLow", "Low", "low", "L"],
+  volume: ["AdjVo", "AdjustmentVolume", "AdjVolume", "Volume", "volume", "Vo"],
 };
 
 function pick(row, keys) {

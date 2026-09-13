@@ -76,7 +76,6 @@ async function main() {
   console.log(`[screening-backtest] 取得期間: ${earliestNeeded} 〜 ${latestAvailable}（銘柄ごとに1リクエスト）`);
 
   const seriesByCode = new Map();
-  const rawSeriesByCode = new Map();
   for (const code of config.STOCK_UNIVERSE) {
     try {
       const rawRows = await jquants.fetchDailyQuotesForCodeRange(
@@ -84,7 +83,6 @@ async function main() {
         earliestNeeded.replaceAll("-", ""),
         latestAvailable.replaceAll("-", "")
       );
-      rawSeriesByCode.set(code, rawRows);
       const normalized = normalizeRawRows(rawRows).filter((r) => r.code === code);
       const rows = groupByCode(normalized).get(code) || [];
       seriesByCode.set(code, rows);
@@ -92,16 +90,8 @@ async function main() {
     } catch (err) {
       console.warn(`[screening-backtest] ${code} の取得に失敗: ${err.message}`);
       seriesByCode.set(code, []);
-      rawSeriesByCode.set(code, []);
     }
   }
-
-  // 【診断用の一時計測】9984(ソフトバンクグループ)で判明した異常値(priceChange5d/20dが
-  // -70%超等)の原因を特定するため、生レスポンスをそのまま保存する。
-  // AdjustmentCloseを優先する修正を入れても数値が変わらなかったため、
-  // そもそも生レスポンスに AdjustmentClose 系のフィールドが存在するのかを確認する目的。
-  // 原因特定後、この行は削除してよい。
-  await writeArtifact("price-raw-sample-9984.json", rawSeriesByCode.get("9984") || []);
 
   // --- 各cutoffDateについて、T以前のデータだけでfeatures+screeningScoreを計算 ---
   const samples = [];

@@ -173,21 +173,53 @@ await test("正規化: 短縮カラム名(V2想定)", () => {
 await test("正規化: 必須項目欠損時はnull", () => {
   assert.equal(normalizeRawRow({ Code: "72030" }), null);
 });
-await test("正規化: AdjustmentCloseが存在する場合は生のCloseより優先される（株式分割対策）", () => {
-  // 実データ検証で発覚: 生のCloseを使うと株式分割銘柄でpriceChange5d/20dが
-  // 「-70%」のようなあり得ない値になっていた。分割調整後の値を優先することを保証する。
+await test("正規化: フォールバック候補(AdjustmentClose)が存在する場合は生のCloseより優先される", () => {
   const row = normalizeRawRow({
     Code: "99840",
     Date: "20260105",
-    Close: 500, // 分割前後で不連続な生の終値（想定）
-    AdjustmentClose: 2000, // 分割調整後の連続的な終値
+    Close: 500,
+    AdjustmentClose: 2000,
     Volume: 1000000,
     AdjustmentVolume: 250000,
   });
   assert.equal(row.close, 2000);
   assert.equal(row.volume, 250000);
 });
-await test("正規化: AdjustmentCloseが無ければ生のCloseにフォールバックする", () => {
+await test("正規化: 実データで確認した本物のキー名(AdjC等)を最優先で使う（株式分割対策の核心）", () => {
+  // 2026-09、9984(ソフトバンクグループ)の実データで確認した本物のレスポンス形式。
+  // 2025-12-29に4分割(AdjFactor:0.25)があり、生のC(終値)は前日比で不連続な値になるが、
+  // AdjC(調整後終値)は連続している。必ずAdjCが優先して使われることを保証する。
+  const dayBeforeSplit = normalizeRawRow({
+    Code: "99840",
+    Date: "20251226",
+    C: 17800, // 生の終値（分割前の水準）
+    AdjC: 4450, // 分割調整後（連続）
+    H: 18000,
+    AdjH: 4500,
+    L: 17540,
+    AdjL: 4385,
+    Vo: 12582200,
+    AdjVo: 50328800,
+  });
+  const daySplitEffective = normalizeRawRow({
+    Code: "99840",
+    Date: "20251229",
+    C: 4485, // 生の終値（分割後の水準。前日比-75%という不連続値になってしまう）
+    AdjC: 4485, // 分割調整後（前日から連続）
+    H: 4544,
+    AdjH: 4544,
+    L: 4332,
+    AdjL: 4332,
+    Vo: 52884600,
+    AdjVo: 52884600,
+  });
+  assert.equal(dayBeforeSplit.close, 4450);
+  assert.equal(daySplitEffective.close, 4485);
+  // AdjCを使えば連続的（生のCを使った場合の-75%のような不連続がない）
+  const pctChange = ((daySplitEffective.close - dayBeforeSplit.close) / dayBeforeSplit.close) * 100;
+  assert.ok(Math.abs(pctChange) < 5, `連続しているはずが${pctChange}%の不連続な変化になっている`);
+});
+await test("正規化: 候補が無ければ生のCloseにフォールバックする", () => {
   const row = normalizeRawRow({ Code: "72030", Date: "20260601", Close: 1234.5, Volume: 100000 });
   assert.equal(row.close, 1234.5);
 });
