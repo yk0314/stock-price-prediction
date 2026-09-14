@@ -7,3 +7,13 @@ compatibility_date = "2026-01-01"
 [[kv_namespaces]]
 binding = "STOCK_KV"
 id = "c1393b19e3c248a194ed9ef222f8e3b9"
+
+# Phase 1(データ基盤)で追加。D1データベース作成後に得られるIDに置き換えてください。
+# 作成コマンド例: npx wrangler d1 create jp-stock-ai-app-db
+# マイグレーション適用例: npx wrangler d1 execute jp-stock-ai-app-db --file=./migrations/0001_init.sql
+# 現時点ではWorkers API層(worker/src/index.js)はまだD1を読み書きしていない
+# （Phase 2でランキング・銘柄詳細APIをD1ベースに移行する際にこのバインディングを使用する）。
+[[d1_databases]]
+binding = "DB"
+database_name = "jp-stock-ai-app-db"
+database_id = "825dc7ca-f43f-4864-bd8b-54908824ef8a"

@@ -632,6 +632,142 @@ await test("topNByDate: 日付ごとにスコア上位N件の平均リターン�
   assert.equal(result["2026-01-01"].top2.avgReturnPct, 10); // (15+5)/2
 });
 
+console.log("[test] d1.js");
+await test("D1Client.query: 成功時にresults配列を返す", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    assert.ok(url.includes("/d1/database/"));
+    const body = JSON.parse(opts.body);
+    assert.equal(body.sql, "SELECT * FROM stocks WHERE code = ?");
+    assert.deepEqual(body.params, ["7203"]);
+    return new Response(
+      JSON.stringify({ success: true, result: [{ results: [{ code: "7203", name: "Toyota" }] }] }),
+      { status: 200 }
+    );
+  };
+  try {
+    const { D1Client } = await import("../src/d1.js");
+    const db = new D1Client({ accountId: "a", databaseId: "b", apiToken: "c" });
+    const rows = await db.query("SELECT * FROM stocks WHERE code = ?", ["7203"]);
+    assert.deepEqual(rows, [{ code: "7203", name: "Toyota" }]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+await test("D1Client.query: success:falseはエラーを投げる", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () =>
+    new Response(JSON.stringify({ success: false, errors: [{ message: "syntax error" }] }), {
+      status: 200,
+    });
+  try {
+    const { D1Client } = await import("../src/d1.js");
+    const db = new D1Client({ accountId: "a", databaseId: "b", apiToken: "c" });
+    await assert.rejects(() => db.query("BAD SQL"));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+await test("D1Client: 必須パラメータ不足はコンストラクタでエラー", async () => {
+  const { D1Client } = await import("../src/d1.js");
+  assert.throws(() => new D1Client({ accountId: "a" }));
+});
+
+console.log("[test] marketDataService.js");
+await test("discoverSubscriptionBoundary: 今日が直接取得できれば遅延なしと判定する", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response(JSON.stringify({ data: [] }), { status: 200 });
+  try {
+    const { discoverSubscriptionBoundary, resetSubscriptionBoundaryCache } = await import(
+      "../src/marketDataService.js"
+    );
+    resetSubscriptionBoundaryCache();
+    const boundary = await discoverSubscriptionBoundary(new JQuantsClient("dummy"));
+    assert.equal(boundary.discoveredVia, "direct-success");
+    assert.equal(boundary.to, new Date().toISOString().slice(0, 10));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+await test("discoverSubscriptionBoundary: 400エラーメッセージから提供期間を検出する（Freeプラン等）", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        message:
+          "Your subscription covers the following dates: 2024-06-20 ~ 2026-06-20. If you want more data, please check other plans",
+      }),
+      { status: 400 }
+    );
+  try {
+    const { discoverSubscriptionBoundary, resetSubscriptionBoundaryCache } = await import(
+      "../src/marketDataService.js"
+    );
+    resetSubscriptionBoundaryCache();
+    const boundary = await discoverSubscriptionBoundary(new JQuantsClient("dummy"));
+    assert.equal(boundary.discoveredVia, "error-message");
+    assert.equal(boundary.to, "2026-06-20");
+    assert.equal(boundary.from, "2024-06-20");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+await test("discoverSubscriptionBoundary: 解析できないエラーはconfigの値にフォールバックする", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response("unexpected error", { status: 500 });
+  try {
+    const { discoverSubscriptionBoundary, resetSubscriptionBoundaryCache } = await import(
+      "../src/marketDataService.js"
+    );
+    resetSubscriptionBoundaryCache();
+    const boundary = await discoverSubscriptionBoundary(new JQuantsClient("dummy"));
+    assert.equal(boundary.discoveredVia, "fallback-config");
+    assert.ok(boundary.to < new Date().toISOString().slice(0, 10));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+await test("discoverSubscriptionBoundary: 同一実行内ではキャッシュされ再度probeしない", async () => {
+  const originalFetch = global.fetch;
+  let callCount = 0;
+  global.fetch = async () => {
+    callCount++;
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+  try {
+    const { discoverSubscriptionBoundary, resetSubscriptionBoundaryCache } = await import(
+      "../src/marketDataService.js"
+    );
+    resetSubscriptionBoundaryCache();
+    await discoverSubscriptionBoundary(new JQuantsClient("dummy"));
+    await discoverSubscriptionBoundary(new JQuantsClient("dummy"));
+    assert.equal(callCount, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+await test("resolveEffectiveCutoffDate: 手動指定があればそれを優先する", async () => {
+  const { resolveEffectiveCutoffDate } = await import("../src/marketDataService.js");
+  const result = await resolveEffectiveCutoffDate(new JQuantsClient("dummy"), "2026-01-01");
+  assert.equal(result.cutoffDate, "2026-01-01");
+  assert.equal(result.source, "manual");
+});
+await test("resolveEffectiveCutoffDate: 未指定なら自動検出した最新日を使う", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response(JSON.stringify({ data: [] }), { status: 200 });
+  try {
+    const { resolveEffectiveCutoffDate, resetSubscriptionBoundaryCache } = await import(
+      "../src/marketDataService.js"
+    );
+    resetSubscriptionBoundaryCache();
+    const result = await resolveEffectiveCutoffDate(new JQuantsClient("dummy"), undefined);
+    assert.equal(result.source, "auto-detected");
+    assert.equal(result.cutoffDate, new Date().toISOString().slice(0, 10));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 console.log(`\n[test] ${passed}件成功`);
 if (process.exitCode) {
   console.error("[test] 失敗したテストがあります");
