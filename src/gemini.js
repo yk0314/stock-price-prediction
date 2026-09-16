@@ -9,13 +9,16 @@ function buildPrompt(feature) {
   // Geminiに渡すのは cutoffDate 以前のデータから計算した数値特徴量・財務情報・市場データのみ。
   // 未来の株価・ニュース・未公開の決算情報等は一切渡さない（データリーク防止）。
   const data = buildGeminiInputData(feature);
-  return `あなたは日本株の銘柄評価を行うアシスタントです。
+  return `あなたは日本株の短期売買（数日〜1週間程度の保有）を支援するアシスタントです。
 以下の数値データ（株価テクニカル指標・財務情報・市場全体との相対強度）だけをもとに、
-この銘柄が「今後30営業日程度で上昇する可能性がどの程度あるか」を評価してください。
+「この銘柄を今買った場合、今後数日〜1週間程度（目安5営業日前後、長くても10営業日程度）で
+上昇する可能性がどの程度あるか」を評価してください。
+長期的に良い会社かどうかではなく、短期的な値動きの観点で評価することを重視してください。
 このデータは特定時点（cutoffDate = ${feature.cutoffDate ?? "不明"}）までに公開されていた情報のみです。
-あなたは株価を直接予言する魔法のモデルではありません。断定的な投資助言（「必ず上がる」等）はせず、
-あくまで傾向・リスクの定性的評価として答えてください。
-upsideProbability等は統計的に校正された確率ではなく、あなたの定性的な評価値として出力してください。
+あなたは株価を直接予言する魔法のモデルではありません。断定的な投資助言（「必ず上がる」等）や
+利益の保証をする表現は絶対に使わず、あくまで傾向・リスクの定性的評価として答えてください。
+upsideProbability/expectedReturn等は統計的に校正された確率・保証された数値ではなく、
+あなたの定性的な見通しとして出力してください。
 financialsがnullの場合は、直近で開示されたデータが無い（または未検証のため取得できていない）ことを意味します。
 
 データ:
@@ -23,7 +26,11 @@ ${JSON.stringify(data, null, 2)}
 
 以下のJSON形式で、JSON以外の文字を一切含めずに回答してください:
 {
-  "score": <0-100の総合スコア>,
+  "score": <0-100の総合スコア。短期的な上昇候補としての魅力度>,
+  "rating": "BUY" | "HOLD" | "SELL",
+  "expectedReturn": <想定される数日〜1週間程度での上昇率(%)。下落見込みなら負の数>,
+  "expectedHoldingDays": <想定保有日数の目安。1〜10程度の整数>,
+  "risk": "LOW" | "MEDIUM" | "HIGH",
   "upsideProbability": <0-100の上昇期待度（定性評価）>,
   "downsideRisk": <0-100の下落リスク（定性評価）>,
   "stance": "positive" | "neutral" | "negative",
@@ -82,6 +89,39 @@ function buildGeminiInputData(feature) {
         }
       : null,
   };
+}
+
+/**
+ * ratingを正規化する。Geminiが"rating"を返さなかった場合は、
+ * 既存の"stance"から変換する（後方互換のため）。
+ * 想定外の値は安全側に倒して"HOLD"にする。
+ */
+export function normalizeRating(parsed) {
+  const raw = String(parsed?.rating ?? "").toUpperCase();
+  if (raw === "BUY" || raw === "HOLD" || raw === "SELL") return raw;
+
+  const stance = String(parsed?.stance ?? "").toLowerCase();
+  if (stance === "positive") return "BUY";
+  if (stance === "negative") return "SELL";
+  if (stance === "neutral") return "HOLD";
+  return "HOLD";
+}
+
+/**
+ * riskを正規化する。Geminiが"risk"を返さなかった場合は、
+ * downsideRisk(0-100)の値から3段階に変換する。
+ */
+export function normalizeRisk(parsed) {
+  const raw = String(parsed?.risk ?? "").toUpperCase();
+  if (raw === "LOW" || raw === "MEDIUM" || raw === "HIGH") return raw;
+
+  const downside = parsed?.downsideRisk;
+  if (typeof downside === "number") {
+    if (downside >= 60) return "HIGH";
+    if (downside >= 35) return "MEDIUM";
+    return "LOW";
+  }
+  return "MEDIUM";
 }
 
 /**
@@ -178,6 +218,14 @@ export async function analyzeWithGemini(apiKey, feature) {
       predictionExecutedAt: feature.predictionExecutedAt,
       price: feature.price, // バックテスト評価(30営業日後との比較)の起点となる、予測時点の終値
       ...parsed,
+      // Phase2: 短期売買向けフィールドの後方互換フォールバック。
+      // Geminiが新フィールドを返さなかった場合でも、既存のstance等から妥当な値を補完し、
+      // 呼び出し側(D1保存・ランキング)がundefinedで壊れないようにする。
+      rating: normalizeRating(parsed),
+      risk: normalizeRisk(parsed),
+      expectedReturn: typeof parsed.expectedReturn === "number" ? parsed.expectedReturn : null,
+      expectedHoldingDays:
+        typeof parsed.expectedHoldingDays === "number" ? parsed.expectedHoldingDays : null,
       disclaimer: PROBABILITY_DISCLAIMER,
       // 後から「どの時点で、どんな情報を使って、何を予測したのか」を完全に再現できるよう、
       // Geminiに実際に渡した入力データをそのまま保存する。

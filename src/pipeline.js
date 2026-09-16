@@ -6,6 +6,7 @@ import { computeFeaturesForAll } from "./features.js";
 import { screenToPool, selectGeminiCandidates } from "./screening.js";
 import { analyzeCandidates } from "./gemini.js";
 import { CloudflareKV, saveResultsToKV } from "./kv.js";
+import { saveToD1 } from "./pipelineD1.js";
 import { writeArtifact } from "./artifacts.js";
 import { fetchTopixForRange, computeMarketFeatures, computeRelativeStrength } from "./market.js";
 import { buildAvailableFinancialsByCode } from "./financials.js";
@@ -214,8 +215,21 @@ async function main() {
   });
   await saveResultsToKV(kv, { meta, ranking, analysisByCode, stocks, pricesByCode });
 
-  console.log("[pipeline] 完了。KVへの保存まで正常終了しました。");
-  console.log(JSON.stringify(meta, null, 2));
+  console.log("[pipeline] KVへの保存が正常終了しました。");
+
+  // --- Stage 8: Cloudflare D1 へ保存（Phase2で追加。KVへの保存は上で完了済み） ---
+  // 【重要】D1保存はあくまで追加処理であり、ここで失敗しても
+  // 既存のKVベースのパイプライン（=現在稼働中のWebアプリ）は既に成功している。
+  // そのためD1保存の失敗ではパイプライン全体を異常終了させず、警告を出して続行する。
+  const d1Summary = await saveToD1(meta, {
+    stocks,
+    pricesByCode,
+    financialsByCode,
+    analysisResults,
+  });
+
+  console.log("[pipeline] 完了。");
+  console.log(JSON.stringify({ ...meta, d1: d1Summary }, null, 2));
 }
 
 main().catch((err) => {

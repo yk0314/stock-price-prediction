@@ -632,6 +632,209 @@ await test("topNByDate: 日付ごとにスコア上位N件の平均リターン�
   assert.equal(result["2026-01-01"].top2.avgReturnPct, 10); // (15+5)/2
 });
 
+console.log("[test] gemini.js (Phase2: 短期売買向けフィールドの正規化)");
+await test("normalizeRating: 明示的なratingをそのまま使う", async () => {
+  const { normalizeRating } = await import("../src/gemini.js");
+  assert.equal(normalizeRating({ rating: "BUY" }), "BUY");
+  assert.equal(normalizeRating({ rating: "sell" }), "SELL");
+});
+await test("normalizeRating: ratingが無ければstanceから変換する（後方互換）", async () => {
+  const { normalizeRating } = await import("../src/gemini.js");
+  assert.equal(normalizeRating({ stance: "positive" }), "BUY");
+  assert.equal(normalizeRating({ stance: "negative" }), "SELL");
+  assert.equal(normalizeRating({ stance: "neutral" }), "HOLD");
+});
+await test("normalizeRating: 想定外の値は安全側のHOLDにする", async () => {
+  const { normalizeRating } = await import("../src/gemini.js");
+  assert.equal(normalizeRating({ rating: "STRONG_BUY" }), "HOLD");
+  assert.equal(normalizeRating({}), "HOLD");
+});
+await test("normalizeRisk: 明示的なriskをそのまま使う", async () => {
+  const { normalizeRisk } = await import("../src/gemini.js");
+  assert.equal(normalizeRisk({ risk: "HIGH" }), "HIGH");
+  assert.equal(normalizeRisk({ risk: "low" }), "LOW");
+});
+await test("normalizeRisk: riskが無ければdownsideRiskから3段階に変換する", async () => {
+  const { normalizeRisk } = await import("../src/gemini.js");
+  assert.equal(normalizeRisk({ downsideRisk: 70 }), "HIGH");
+  assert.equal(normalizeRisk({ downsideRisk: 40 }), "MEDIUM");
+  assert.equal(normalizeRisk({ downsideRisk: 20 }), "LOW");
+  assert.equal(normalizeRisk({}), "MEDIUM");
+});
+
+console.log("[test] pipelineD1.js (D1保存の統合ロジック)");
+await test("saveToD1: CF_D1_DATABASE_ID未設定ならスキップし、パイプラインを止めない", async () => {
+  const original = process.env.CF_D1_DATABASE_ID;
+  delete process.env.CF_D1_DATABASE_ID;
+  try {
+    const { saveToD1 } = await import("../src/pipelineD1.js");
+    const result = await saveToD1(
+      { predictionExecutedAt: "2026-09-14T06:00:00Z", cutoffDate: "2026-09-13" },
+      { stocks: [], pricesByCode: {}, financialsByCode: new Map(), analysisResults: [] }
+    );
+    assert.equal(result.enabled, false);
+    assert.equal(result.aiEvaluations, 0);
+  } finally {
+    if (original) process.env.CF_D1_DATABASE_ID = original;
+  }
+});
+await test("saveToD1: AI評価の3つの日付を正しく設定する", async () => {
+  process.env.CF_ACCOUNT_ID = "acc";
+  process.env.CF_D1_DATABASE_ID = "db";
+  process.env.CF_API_TOKEN = "tok";
+  const originalFetch = global.fetch;
+  const capturedBodies = [];
+  global.fetch = async (url, opts) => {
+    capturedBodies.push(JSON.parse(opts.body));
+    return new Response(
+      JSON.stringify({ success: true, result: [{ results: [], meta: { last_row_id: 7 } }] }),
+      { status: 200 }
+    );
+  };
+  try {
+    const { saveToD1 } = await import("../src/pipelineD1.js");
+    const result = await saveToD1(
+      { predictionExecutedAt: "2026-09-14T06:00:00Z", cutoffDate: "2026-09-13" },
+      {
+        stocks: [{ code: "7203" }],
+        pricesByCode: { "7203": [{ date: "2026-09-13", close: 2800, volume: 100 }] },
+        financialsByCode: new Map(),
+        analysisResults: [
+          {
+            code: "7203",
+            dataAsOf: "2026-09-13",
+            score: 82,
+            rating: "BUY",
+            price: 2800,
+            positiveFactors: [],
+            negativeFactors: [],
+          },
+        ],
+      }
+    );
+    assert.equal(result.enabled, true);
+    assert.equal(result.aiEvaluations, 1);
+    assert.deepEqual(result.savedEvaluationIds, [7]);
+
+    const aiInsert = capturedBodies.find((b) => b.sql.includes("INSERT INTO ai_evaluations"));
+    assert.ok(aiInsert, "ai_evaluationsへのINSERTが実行されていない");
+    assert.equal(aiInsert.params[1], "2026-09-14"); // evaluation_date(実行日)
+    assert.equal(aiInsert.params[2], "2026-09-13"); // data_as_of_date(市場データ基準日)
+    assert.equal(aiInsert.params[3], "2026-09-14T06:00:00Z"); // generated_at
+    // INSERT方式（UPDATEやINSERT OR REPLACEではない）であることを確認
+    assert.ok(!aiInsert.sql.includes("REPLACE"));
+    assert.ok(!aiInsert.sql.includes("UPDATE"));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+await test("saveToD1: 一部テーブルの保存が失敗しても他は継続する", async () => {
+  process.env.CF_ACCOUNT_ID = "acc";
+  process.env.CF_D1_DATABASE_ID = "db";
+  process.env.CF_API_TOKEN = "tok";
+  const originalFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    const body = JSON.parse(opts.body);
+    // stock_pricesの保存だけ失敗させる
+    if (body.sql.includes("stock_prices")) {
+      return new Response("boom", { status: 500 });
+    }
+    return new Response(
+      JSON.stringify({ success: true, result: [{ results: [], meta: { last_row_id: 1 } }] }),
+      { status: 200 }
+    );
+  };
+  try {
+    const { saveToD1 } = await import("../src/pipelineD1.js");
+    const result = await saveToD1(
+      { predictionExecutedAt: "2026-09-14T06:00:00Z", cutoffDate: "2026-09-13" },
+      {
+        stocks: [{ code: "7203" }],
+        pricesByCode: { "7203": [{ date: "2026-09-13", close: 2800 }] },
+        financialsByCode: new Map(),
+        analysisResults: [
+          { code: "7203", dataAsOf: "2026-09-13", score: 80, positiveFactors: [], negativeFactors: [] },
+        ],
+      }
+    );
+    // stock_pricesは失敗するが、stocksとai_evaluationsは成功している
+    assert.equal(result.stocks, 1);
+    assert.equal(result.aiEvaluations, 1);
+    assert.ok(result.failures.some((f) => f.stage === "stock_prices"));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+console.log("[test] d1Repository.js");
+await test("saveStockPricesToD1: Mapを行配列に変換してbatchInsertする", async () => {
+  const { saveStockPricesToD1 } = await import("../src/d1Repository.js");
+  let capturedTable, capturedColumns, capturedRows;
+  const fakeD1 = {
+    async batchInsertOrReplace(table, columns, rows) {
+      capturedTable = table;
+      capturedColumns = columns;
+      capturedRows = rows;
+      return rows.length;
+    },
+  };
+  const pricesByCode = new Map([
+    ["7203", [{ date: "2026-06-01", close: 2800, high: 2850, low: 2780, volume: 1000 }]],
+  ]);
+  const written = await saveStockPricesToD1(fakeD1, pricesByCode);
+  assert.equal(written, 1);
+  assert.equal(capturedTable, "stock_prices");
+  assert.ok(capturedColumns.includes("close"));
+  assert.equal(capturedRows[0][0], "7203");
+  assert.equal(capturedRows[0][5], 2800); // close
+});
+await test("saveAiEvaluationToD1: 3つの日付フィールドを分けて保存し、idを返す", async () => {
+  const { saveAiEvaluationToD1 } = await import("../src/d1Repository.js");
+  let capturedParams;
+  const fakeD1 = {
+    async run(sql, params) {
+      capturedParams = params;
+      assert.ok(sql.includes("INSERT INTO ai_evaluations"));
+      return { results: [], meta: { last_row_id: 42 } };
+    },
+  };
+  const id = await saveAiEvaluationToD1(fakeD1, {
+    code: "7203",
+    evaluationDate: "2026-09-14",
+    dataAsOfDate: "2026-09-13",
+    generatedAt: "2026-09-14T06:00:00Z",
+    score: 82,
+    rating: "BUY",
+    positiveFactors: ["a"],
+    negativeFactors: [],
+    usedFeatures: { x: 1 },
+  });
+  assert.equal(id, 42);
+  assert.equal(capturedParams[1], "2026-09-14"); // evaluation_date
+  assert.equal(capturedParams[2], "2026-09-13"); // data_as_of_date
+  assert.equal(capturedParams[3], "2026-09-14T06:00:00Z"); // generated_at
+  assert.equal(capturedParams[12], '["a"]'); // positive_factors(JSON文字列)
+});
+await test("saveAiEvaluationsToD1: 1件失敗しても残りは継続する", async () => {
+  const { saveAiEvaluationsToD1 } = await import("../src/d1Repository.js");
+  let callCount = 0;
+  const fakeD1 = {
+    async run() {
+      callCount++;
+      if (callCount === 2) throw new Error("D1 temporary failure");
+      return { results: [], meta: { last_row_id: callCount } };
+    },
+  };
+  const result = await saveAiEvaluationsToD1(fakeD1, [
+    { code: "A", evaluationDate: "d", dataAsOfDate: "d", generatedAt: "t" },
+    { code: "B", evaluationDate: "d", dataAsOfDate: "d", generatedAt: "t" },
+    { code: "C", evaluationDate: "d", dataAsOfDate: "d", generatedAt: "t" },
+  ]);
+  assert.equal(result.savedIds.length, 2);
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.failures[0].code, "B");
+});
+
 console.log("[test] d1.js");
 await test("D1Client.query: 成功時にresults配列を返す", async () => {
   const originalFetch = global.fetch;
@@ -671,6 +874,52 @@ await test("D1Client.query: success:falseはエラーを投げる", async () => 
 await test("D1Client: 必須パラメータ不足はコンストラクタでエラー", async () => {
   const { D1Client } = await import("../src/d1.js");
   assert.throws(() => new D1Client({ accountId: "a" }));
+});
+await test("batchInsertOrReplace: 複数行を1つのSQLにまとめる", async () => {
+  const originalFetch = global.fetch;
+  const capturedBodies = [];
+  global.fetch = async (url, opts) => {
+    capturedBodies.push(JSON.parse(opts.body));
+    return new Response(JSON.stringify({ success: true, result: [{ results: [] }] }), { status: 200 });
+  };
+  try {
+    const { D1Client } = await import("../src/d1.js");
+    const db = new D1Client({ accountId: "a", databaseId: "b", apiToken: "c" });
+    const written = await db.batchInsertOrReplace(
+      "stocks",
+      ["code", "name"],
+      [["7203", "Toyota"], ["6758", "Sony"]]
+    );
+    assert.equal(written, 2);
+    assert.equal(capturedBodies.length, 1); // 2行が1リクエストにまとまる
+    assert.ok(capturedBodies[0].sql.includes("INSERT OR REPLACE INTO stocks"));
+    assert.deepEqual(capturedBodies[0].params, ["7203", "Toyota", "6758", "Sony"]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+await test("batchInsertOrReplace: chunkSizeを超えると複数リクエストに分割される", async () => {
+  const originalFetch = global.fetch;
+  let callCount = 0;
+  global.fetch = async () => {
+    callCount++;
+    return new Response(JSON.stringify({ success: true, result: [{ results: [] }] }), { status: 200 });
+  };
+  try {
+    const { D1Client } = await import("../src/d1.js");
+    const db = new D1Client({ accountId: "a", databaseId: "b", apiToken: "c" });
+    const rows = Array.from({ length: 5 }, (_, i) => [String(i), "x"]);
+    const written = await db.batchInsertOrReplace("stocks", ["code", "name"], rows, 2);
+    assert.equal(written, 5);
+    assert.equal(callCount, 3); // 2+2+1
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+await test("batchInsertOrReplace: 空配列なら何もせず0を返す", async () => {
+  const { D1Client } = await import("../src/d1.js");
+  const db = new D1Client({ accountId: "a", databaseId: "b", apiToken: "c" });
+  assert.equal(await db.batchInsertOrReplace("stocks", ["code"], []), 0);
 });
 
 console.log("[test] marketDataService.js");

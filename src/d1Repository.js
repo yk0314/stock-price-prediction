@@ -1,0 +1,148 @@
+// D1への書き込みロジックをまとめるモジュール。
+// pipeline.js等の上位層は、SQLを直接書かずこの層の関数だけを呼ぶようにする。
+
+/**
+ * 銘柄コードごとの株価履歴(Map<code, rows>)をstock_pricesテーブルへ一括保存する。
+ * PRIMARY KEY (code, date) のため、同じ日付を再実行しても安全に上書きされる。
+ */
+export async function saveStockPricesToD1(d1, pricesByCode, dataSource = "jquants") {
+  const fetchedAt = new Date().toISOString();
+  const columns = [
+    "code", "date", "open", "high", "low", "close", "volume", "data_source", "fetched_at",
+  ];
+  const rows = [];
+
+  for (const [code, series] of pricesByCode.entries()) {
+    for (const row of series) {
+      rows.push([
+        code,
+        row.date,
+        // open は現状の正規化データに含まれていないためnull
+        // （必要になれば normalize.js 側で AdjO を拾うよう拡張する）
+        null,
+        row.high ?? null,
+        row.low ?? null,
+        row.close,
+        row.volume ?? null,
+        dataSource,
+        fetchedAt,
+      ]);
+    }
+  }
+
+  return d1.batchInsertOrReplace("stock_prices", columns, rows);
+}
+
+/**
+ * 銘柄コードごとの財務情報をfinancialsテーブルへ保存する。
+ * @param {Map<string, object>} financialsByCode - normalizeFinancialRow()相当のオブジェクト
+ */
+export async function saveFinancialsToD1(d1, financialsByCode) {
+  const fetchedAt = new Date().toISOString();
+  const columns = [
+    "code", "disc_date", "disc_time", "net_sales", "operating_profit",
+    "ordinary_profit", "profit", "eps", "bps", "equity_to_asset_ratio", "fetched_at",
+  ];
+  const rows = [];
+
+  for (const [code, fin] of financialsByCode.entries()) {
+    if (!fin) continue;
+    rows.push([
+      code,
+      fin.discDate,
+      fin.discTime ?? null,
+      fin.netSales ?? null,
+      fin.operatingProfit ?? null,
+      fin.ordinaryProfit ?? null,
+      fin.profit ?? null,
+      fin.eps ?? null,
+      fin.bps ?? null,
+      fin.equityToAssetRatio ?? null,
+      fetchedAt,
+    ]);
+  }
+
+  return d1.batchInsertOrReplace("financials", columns, rows);
+}
+
+/**
+ * 銘柄マスタ(stocks)を更新する。
+ * @param {Array<{code, name?, market?}>} stocks
+ */
+export async function saveStocksToD1(d1, stocks) {
+  const updatedAt = new Date().toISOString();
+  const columns = ["code", "name", "market", "updated_at"];
+  const rows = stocks.map((s) => [s.code, s.name ?? null, s.market ?? null, updatedAt]);
+  return d1.batchInsertOrReplace("stocks", columns, rows);
+}
+
+/**
+ * 1件のAI評価をai_evaluationsへ追記保存する（上書きしない。常にINSERT）。
+ * evaluation_date / data_as_of_date / generated_at を明確に分離して保存する。
+ * @returns {Promise<number>} 挿入されたレコードのid（Phase3で購入時評価を紐付ける際に使う）
+ */
+export async function saveAiEvaluationToD1(d1, evaluation) {
+  const sql = `INSERT INTO ai_evaluations (
+      code, evaluation_date, data_as_of_date, generated_at,
+      score, rating, upside_probability, downside_risk, expected_return, confidence,
+      reasoning, summary, positive_factors, negative_factors, used_features,
+      source, price_at_evaluation
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+  const params = [
+    evaluation.code,
+    evaluation.evaluationDate,
+    evaluation.dataAsOfDate,
+    evaluation.generatedAt,
+    evaluation.score ?? null,
+    evaluation.rating ?? null,
+    evaluation.upsideProbability ?? null,
+    evaluation.downsideRisk ?? null,
+    evaluation.expectedReturn ?? null,
+    evaluation.confidence ?? null,
+    evaluation.reasoning ?? null,
+    evaluation.summary ?? null,
+    JSON.stringify(evaluation.positiveFactors ?? []),
+    JSON.stringify(evaluation.negativeFactors ?? []),
+    JSON.stringify(evaluation.usedFeatures ?? {}),
+    evaluation.source ?? "pipeline",
+    evaluation.priceAtEvaluation ?? null,
+  ];
+
+  const { meta } = await d1.run(sql, params);
+  return meta.last_row_id;
+}
+
+/**
+ * 複数のAI評価をまとめて保存する。1件失敗しても残りは継続する
+ * （D1エラーでパイプライン全体を止めないため。失敗は呼び出し側に返す）。
+ * @returns {Promise<{savedIds: Array<number>, failures: Array<{code, error}>}>}
+ */
+export async function saveAiEvaluationsToD1(d1, evaluations) {
+  const savedIds = [];
+  const failures = [];
+  for (const evaluation of evaluations) {
+    try {
+      savedIds.push(await saveAiEvaluationToD1(d1, evaluation));
+    } catch (err) {
+      failures.push({ code: evaluation.code, error: err.message });
+    }
+  }
+  return { savedIds, failures };
+}
+
+/**
+ * エラーログをD1へ記録する（Cron等の自動実行での障害追跡用）。
+ * これ自体が失敗してもパイプラインを止めないよう、呼び出し側でtry/catchすること。
+ */
+export async function logErrorToD1(d1, { source, errorType, message, context }) {
+  const sql = `INSERT INTO error_logs (occurred_at, source, error_type, message, context)
+    VALUES (?, ?, ?, ?, ?)`;
+  await d1.query(sql, [
+    new Date().toISOString(),
+    source,
+    errorType ?? null,
+    message ?? null,
+    context ? JSON.stringify(context) : null,
+  ]);
+}

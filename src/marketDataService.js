@@ -121,6 +121,19 @@ export async function getHistoricalPrices(client, code, fromDate, toDate) {
 }
 
 /**
+ * 指定した期間について、全銘柄分の株価データを日付ベースで一括取得し、
+ * 銘柄コードごとにグルーピングして返す（分割調整後の値を使用）。
+ * 全銘柄対応(UNIVERSE_MODE="all")時のデータ取得はこの関数を経由すること。
+ * 内部的には日付ループでの一括取得を使う（1銘柄ずつのループではない）。
+ *
+ * @returns {Promise<Map<string, Array<{date, close, high, low, volume}>>>}
+ */
+export async function getBulkHistoricalPrices(client, fromDate, cutoffDate) {
+  const rawRows = await client.fetchDailyQuotesBulkForDateRange(fromDate, cutoffDate);
+  return groupByCode(normalizeRawRows(rawRows));
+}
+
+/**
  * 指定銘柄の、asOfDate時点で利用可能だった最新の財務情報を取得する。
  * （開示日ベースのフィルタは financials.js の既存ロジックをそのまま再利用する）
  *
