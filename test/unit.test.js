@@ -921,6 +921,53 @@ await test("batchInsertOrReplace: 空配列なら何もせず0を返す", async 
   const db = new D1Client({ accountId: "a", databaseId: "b", apiToken: "c" });
   assert.equal(await db.batchInsertOrReplace("stocks", ["code"], []), 0);
 });
+await test("batchInsertOrReplace: D1の上限(100バインド変数)を超えないよう列数から自動計算する", async () => {
+  // 実データ検証で発覚: 11列のテーブルでchunkSize未指定(200行)にすると
+  // 200*11=2200個のバインド変数になり、D1の上限100を大幅に超えて
+  // "too many SQL variables"エラーになっていた。列数から安全な行数を自動計算することを保証する。
+  const originalFetch = global.fetch;
+  const capturedParamCounts = [];
+  global.fetch = async (url, opts) => {
+    const body = JSON.parse(opts.body);
+    capturedParamCounts.push(body.params.length);
+    return new Response(JSON.stringify({ success: true, result: [{ results: [] }] }), { status: 200 });
+  };
+  try {
+    const { D1Client } = await import("../src/d1.js");
+    const db = new D1Client({ accountId: "a", databaseId: "b", apiToken: "c" });
+    const columns = Array.from({ length: 11 }, (_, i) => `col${i}`); // financialsを想定した11列
+    const rows = Array.from({ length: 250 }, () => columns.map(() => "v"));
+    const written = await db.batchInsertOrReplace("financials", columns, rows); // chunkSize省略
+    assert.equal(written, 250);
+    for (const count of capturedParamCounts) {
+      assert.ok(count <= 100, `バインド変数が上限100を超えている: ${count}`);
+    }
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+await test("batchInsertOrReplace: 呼び出し側指定のchunkSizeがD1上限を超える場合は上限側を優先する", async () => {
+  const originalFetch = global.fetch;
+  const capturedParamCounts = [];
+  global.fetch = async (url, opts) => {
+    const body = JSON.parse(opts.body);
+    capturedParamCounts.push(body.params.length);
+    return new Response(JSON.stringify({ success: true, result: [{ results: [] }] }), { status: 200 });
+  };
+  try {
+    const { D1Client } = await import("../src/d1.js");
+    const db = new D1Client({ accountId: "a", databaseId: "b", apiToken: "c" });
+    const columns = ["a", "b", "c", "d", "e", "f", "g", "h", "i"]; // stock_pricesを想定した9列
+    const rows = Array.from({ length: 50 }, () => columns.map(() => "v"));
+    // 呼び出し側が誤って200を指定しても、9列×200=1800は上限を超えるため自動的に抑制される
+    await db.batchInsertOrReplace("stock_prices", columns, rows, 200);
+    for (const count of capturedParamCounts) {
+      assert.ok(count <= 100, `バインド変数が上限100を超えている: ${count}`);
+    }
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
 
 console.log("[test] marketDataService.js");
 await test("discoverSubscriptionBoundary: 今日が直接取得できれば遅延なしと判定する", async () => {

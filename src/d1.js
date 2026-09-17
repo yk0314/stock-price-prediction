@@ -78,20 +78,31 @@ export class D1Client {
    * 1行ずつAPIを呼ぶ非効率を避けるため、複数行を1つのSQL文にまとめる。
    * PRIMARY KEYが重複した場合は上書きする（同じ日付のデータを再実行しても安全）。
    *
+   * 【重要】Cloudflare D1は1クエリあたりのバインド変数（?の数）が最大100個に制限されている
+   * （SQLite標準の999ではなく、D1独自の制限）。実データ検証で
+   * 「too many SQL variables」エラーが発生したため、列数に応じて
+   * 1チャンクあたりの行数を自動計算し、必ず上限を下回るようにする。
+   *
    * @param {string} table
    * @param {Array<string>} columns
    * @param {Array<Array<any>>} rows - 各行の値の配列（columnsと同じ順序）
-   * @param {number} chunkSize - 1リクエストあたりの最大行数
+   * @param {number} [chunkSize] - 1リクエストあたりの最大行数（省略時は列数から自動計算）
    * @returns {Promise<number>} 書き込んだ総行数
    */
-  async batchInsertOrReplace(table, columns, rows, chunkSize = 200) {
+  async batchInsertOrReplace(table, columns, rows, chunkSize) {
     if (rows.length === 0) return 0;
+
+    const D1_MAX_BOUND_PARAMS = 100; // Cloudflare D1の上限(SQLiteの999ではない)
+    const safeRowsPerChunk = Math.max(1, Math.floor(D1_MAX_BOUND_PARAMS / columns.length));
+    const effectiveChunkSize = chunkSize
+      ? Math.min(chunkSize, safeRowsPerChunk)
+      : safeRowsPerChunk;
 
     const columnList = columns.join(", ");
     let written = 0;
 
-    for (let i = 0; i < rows.length; i += chunkSize) {
-      const chunk = rows.slice(i, i + chunkSize);
+    for (let i = 0; i < rows.length; i += effectiveChunkSize) {
+      const chunk = rows.slice(i, i + effectiveChunkSize);
       const placeholders = chunk
         .map(() => `(${columns.map(() => "?").join(", ")})`)
         .join(", ");
