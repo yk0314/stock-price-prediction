@@ -23,9 +23,16 @@ function addDaysUTC(dateStr, days) {
  * UNIVERSE_MODE = "all" の場合は絞り込みを行わない（全銘柄運用時）。
  * データ取得自体は常に日付ベースの一括取得で行っており、
  * このフィルタは「取得後にどこまでを分析対象にするか」を制御するだけである。
+ *
+ * UNIVERSE_MODEは config.js の既定値のほか、環境変数 UNIVERSE_MODE でも上書きできる
+ * （workflow_dispatchの入力から、コードを変更せずに検証できるようにするため）。
  */
-function applyUniverseFilter(groupedByCode) {
-  if (config.UNIVERSE_MODE === "all") {
+function getUniverseMode() {
+  return process.env.UNIVERSE_MODE || config.UNIVERSE_MODE;
+}
+
+function applyUniverseFilter(groupedByCode, universeMode) {
+  if (universeMode === "all") {
     return groupedByCode;
   }
   const universe = new Set(config.STOCK_UNIVERSE);
@@ -39,7 +46,11 @@ function applyUniverseFilter(groupedByCode) {
 async function main() {
   const startedAt = new Date();
   const predictionExecutedAt = startedAt.toISOString();
-  console.log(`[pipeline] 開始: ${predictionExecutedAt}`);
+  const universeMode = getUniverseMode();
+  console.log(`[pipeline] 開始: ${predictionExecutedAt} (UNIVERSE_MODE=${universeMode})`);
+
+  // API呼び出し中に発生したエラー件数を種類別に集計する（検証項目「APIエラー数」用）。
+  const apiErrorCounts = { jquantsFinancials: 0, topix: 0, gemini429OrError: 0 };
 
   // --- Stage 0: cutoffDate の決定（手動指定 or 自動計算） ---
   const manualCutoff = process.env.CUTOFF_DATE || undefined;
@@ -49,6 +60,7 @@ async function main() {
   const fetchStartDate = addDaysUTC(cutoffDate, -config.FETCH_LOOKBACK_CALENDAR_DAYS);
 
   // --- Stage 1: raw data — J-Quants から日付ベースで一括取得（1銘柄ずつのループは行わない） ---
+  // 全銘柄運用時もこの取得自体は変わらない（元々常に全銘柄分を取得しているため）。
   const jquants = new JQuantsClient(process.env.JQUANTS_API_KEY);
   const rawRows = await jquants.fetchDailyQuotesBulkForDateRange(
     fetchStartDate,
@@ -73,21 +85,21 @@ async function main() {
   // --- Stage 2: normalized data — 共通スキーマへの正規化 + 銘柄コードごとにグルーピング ---
   const normalizedRows = normalizeRawRows(rawRows);
   const groupedAll = groupByCode(normalizedRows);
-  console.log(`[pipeline] normalized data: ${normalizedRows.length}件 / ${groupedAll.size}銘柄`);
+  console.log(`[pipeline] normalized data: ${normalizedRows.length}件 / ${groupedAll.size}銘柄（取得銘柄数）`);
   await writeArtifact("normalized-data.json", {
     count: normalizedRows.length,
     codeCount: groupedAll.size,
   });
 
-  // --- ユニバースフィルタ（Phase1: STOCK_UNIVERSE のみ / 将来: 全銘柄） ---
-  const grouped = applyUniverseFilter(groupedAll);
+  // --- ユニバースフィルタ（phase1_subset: 10銘柄 / all: 全銘柄） ---
+  const grouped = applyUniverseFilter(groupedAll, universeMode);
   console.log(
-    `[pipeline] ユニバースフィルタ後: ${grouped.size}銘柄 (mode=${config.UNIVERSE_MODE})`
+    `[pipeline] ユニバースフィルタ後: ${grouped.size}銘柄 (mode=${universeMode})`
   );
 
   // --- Stage 3: features — 特徴量計算（対象は grouped = フィルタ後のユニバース） ---
   const featureList = computeFeaturesForAll(grouped);
-  console.log(`[pipeline] features: ${featureList.length}銘柄で計算成功`);
+  console.log(`[pipeline] features: ${featureList.length}銘柄で計算成功（スクリーニング前銘柄数）`);
 
   if (featureList.length === 0) {
     await writeArtifact("features.json", featureList);
@@ -97,8 +109,6 @@ async function main() {
   }
 
   // --- Stage 3.5: 市場データ(TOPIX) — 専用の軽量エンドポイントで取得し、相対強度を計算 ---
-  // 日付ループではなくfrom/to範囲指定の1回（〜数回のページング）で取得できるため、
-  // 無料枠への影響はごく小さい。
   const relativeStrengthDays = config.MARKET.relativeStrengthTradingDays;
   let topixChangeNd = null;
   try {
@@ -109,8 +119,8 @@ async function main() {
       `[pipeline] market(TOPIX): ${topixRows.length}件取得 / ${relativeStrengthDays}営業日騰落率=${topixChangeNd}`
     );
   } catch (err) {
-    // 市場データは補助的な特徴量であり、取得できなくてもパイプライン全体は継続できるようにする
-    // （財務・株価と異なりTOPIXが無くても既存の特徴量だけで分析は成立するため）。
+    // 市場データは補助的な特徴量であり、取得できなくてもパイプライン全体は継続できるようにする。
+    apiErrorCounts.topix++;
     console.warn(`[pipeline] TOPIX取得に失敗したため、relativeStrengthはnullのまま続行: ${err.message}`);
   }
   for (const f of featureList) {
@@ -118,19 +128,32 @@ async function main() {
   }
   await writeArtifact("features.json", featureList);
 
-  // --- Stage 3.6: 財務データ — STOCK_UNIVERSE銘柄のみ、銘柄コード指定で取得（全銘柄対応は将来課題） ---
+  // --- Stage 4: screened — 数値スクリーニング(流動性フィルタ含む)でプールを作成 → Gemini対象を選定 ---
+  // 財務データはこの後、Gemini対象銘柄にのみ取得する（全銘柄・プール全体には取得しない）。
+  const pool = screenToPool(featureList);
+  const excludedCount = featureList.length - pool.length;
+  const geminiCandidates = selectGeminiCandidates(pool);
+  console.log(
+    `[pipeline] screening: 通過前${featureList.length}件 → 除外${excludedCount}件 → プール${pool.length}件 → Gemini対象${geminiCandidates.length}件`
+  );
+  await writeArtifact("screened.json", { pool, geminiCandidates });
+
+  // --- Stage 4.5: 財務データ — Gemini対象銘柄にのみ、銘柄コード指定で取得 ---
+  // 全銘柄(数千件)やスクリーニングプール(百件超)に対して行うと非現実的なため、
+  // 実際にGeminiへ渡す少数の候補にのみ取得する。これはUNIVERSE_MODEに関わらず同じロジック。
   // 開示日(discDate)がcutoffDateより厳密に前のものだけを採用し、未来情報の混入を防ぐ。
   const financialsByCode = new Map();
-  if (config.FINANCIALS.enabled && config.UNIVERSE_MODE === "phase1_subset") {
+  if (config.FINANCIALS.enabled) {
     const rawFinancialsByCode = new Map();
-    for (const code of config.STOCK_UNIVERSE) {
+    for (const candidate of geminiCandidates) {
       try {
-        const rows = await jquants.fetchFinancialsForCode(code);
-        rawFinancialsByCode.set(code, rows);
+        const rows = await jquants.fetchFinancialsForCode(candidate.code);
+        rawFinancialsByCode.set(candidate.code, rows);
       } catch (err) {
         // 財務データはあくまで補助的な特徴量。1銘柄の取得失敗でパイプライン全体を止めない。
-        console.warn(`[pipeline] 財務情報取得に失敗 code=${code}: ${err.message}`);
-        rawFinancialsByCode.set(code, []);
+        apiErrorCounts.jquantsFinancials++;
+        console.warn(`[pipeline] 財務情報取得に失敗 code=${candidate.code}: ${err.message}`);
+        rawFinancialsByCode.set(candidate.code, []);
       }
     }
     const available = buildAvailableFinancialsByCode(rawFinancialsByCode, cutoffDate);
@@ -138,23 +161,15 @@ async function main() {
       financialsByCode.set(code, fin);
     }
     console.log(
-      `[pipeline] financials: ${config.STOCK_UNIVERSE.length}銘柄中 ${available.size}銘柄で利用可能な開示情報あり`
+      `[pipeline] financials: Gemini対象${geminiCandidates.length}銘柄中 ${available.size}銘柄で利用可能な開示情報あり`
     );
     await writeArtifact("financials.json", Object.fromEntries(available));
   } else {
-    console.log("[pipeline] financials: UNIVERSE_MODEが'all'のため今回はスキップ（Phase3以降の課題）");
+    console.log("[pipeline] financials: config.FINANCIALS.enabled=falseのためスキップ");
   }
-  for (const f of featureList) {
-    f.financials = financialsByCode.get(f.code) ?? null;
+  for (const candidate of geminiCandidates) {
+    candidate.financials = financialsByCode.get(candidate.code) ?? null;
   }
-
-  // --- Stage 4: screened — 数値スクリーニングでプールを作成 → Gemini対象を選定 ---
-  const pool = screenToPool(featureList);
-  const geminiCandidates = selectGeminiCandidates(pool);
-  console.log(
-    `[pipeline] screening: pool=${pool.length}件 / Gemini対象=${geminiCandidates.length}件`
-  );
-  await writeArtifact("screened.json", { pool, geminiCandidates });
 
   // --- Stage 5: gemini — AI分析（候補銘柄のみ。無料枠超過時は自動スキップ・リトライなし） ---
   const analysisResults = await analyzeCandidates(
@@ -162,8 +177,9 @@ async function main() {
     geminiCandidates,
     { cutoffDate, predictionExecutedAt }
   );
+  apiErrorCounts.gemini429OrError = geminiCandidates.length - analysisResults.length;
   console.log(
-    `[pipeline] gemini: ${analysisResults.length}/${geminiCandidates.length}件で分析成功`
+    `[pipeline] gemini: ${analysisResults.length}/${geminiCandidates.length}件で分析成功（失敗/スキップ=${apiErrorCounts.gemini429OrError}件）`
   );
   await writeArtifact("gemini-results.json", analysisResults);
 
@@ -178,7 +194,8 @@ async function main() {
     analysisByCode[result.code] = result;
   }
 
-  // 銘柄一覧・簡易株価（プールに関わらず特徴量が計算できた全銘柄分）
+  // 銘柄一覧・簡易株価（KV向け。プールに関わらず特徴量が計算できた全銘柄分。
+  // 全銘柄運用時は数千件になりうるが、KVの1バリューあたりの上限(25MB)には収まる想定）。
   const stocks = featureList.map((f) => ({
     code: f.code,
     price: f.price,
@@ -191,20 +208,24 @@ async function main() {
   }
 
   const finishedAt = new Date();
+  const processingTimeMs = finishedAt.getTime() - startedAt.getTime();
   const meta = {
     cutoffDate,
     cutoffSource: source,
     predictionExecutedAt,
     finishedAt: finishedAt.toISOString(),
-    universeMode: config.UNIVERSE_MODE,
+    processingTimeMs,
+    universeMode,
     fetchedCodeCount: groupedAll.size,
     universeCodeCount: grouped.size,
     featureCount: featureList.length,
+    excludedByScreeningCount: excludedCount,
     poolCount: pool.length,
     geminiCandidateCount: geminiCandidates.length,
     analyzedCount: analysisResults.length,
+    financialsFetchedCount: financialsByCode.size,
     topixChangeNd,
-    financialsAvailableCount: financialsByCode.size,
+    apiErrorCounts,
   };
 
   // --- Stage 7: Cloudflare KV へ保存（表示用データ + バックテスト用の追記履歴） ---
@@ -218,17 +239,28 @@ async function main() {
   console.log("[pipeline] KVへの保存が正常終了しました。");
 
   // --- Stage 8: Cloudflare D1 へ保存（Phase2で追加。KVへの保存は上で完了済み） ---
-  // 【重要】D1保存はあくまで追加処理であり、ここで失敗しても
-  // 既存のKVベースのパイプライン（=現在稼働中のWebアプリ）は既に成功している。
-  // そのためD1保存の失敗ではパイプライン全体を異常終了させず、警告を出して続行する。
+  // 【重要・全銘柄運用時の設計】D1へのstock_prices/stocksの書き込みは、
+  // 全銘柄(数千件)ではなく「スクリーニングプール(pool)に残った銘柄」のみに限定する。
+  // 理由: D1は1クエリあたり100バインド変数までという制約があり、全銘柄×約41日分の
+  // 生データをそのまま書き込もうとすると数万行規模になり、書き込みリクエスト数・
+  // 処理時間の両面で非現実的になるため。プール銘柄程度の規模であれば無理なく収まる。
+  // KVへの保存（全銘柄分のサマリ）はこの制限を受けず、上記Stage 7の通り全銘柄分を保存している。
+  const poolCodes = new Set(pool.map((p) => p.code));
+  const pricesByCodeForD1 = new Map(
+    Object.entries(pricesByCode).filter(([code]) => poolCodes.has(code))
+  );
+  const stocksForD1 = stocks.filter((s) => poolCodes.has(s.code));
+
   const d1Summary = await saveToD1(meta, {
-    stocks,
-    pricesByCode,
+    stocks: stocksForD1,
+    pricesByCode: pricesByCodeForD1,
     financialsByCode,
     analysisResults,
   });
 
-  console.log("[pipeline] 完了。");
+  console.log(
+    `[pipeline] 完了。処理時間: ${(processingTimeMs / 1000 / 60).toFixed(1)}分`
+  );
   console.log(JSON.stringify({ ...meta, d1: d1Summary }, null, 2));
 }
 

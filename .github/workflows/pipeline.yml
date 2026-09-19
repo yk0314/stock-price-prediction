@@ -8,6 +8,14 @@ on:
         description: "cutoffDate (YYYY-MM-DD)。省略時は「実行日-90日」を自動計算します。"
         required: false
         default: ""
+      universeMode:
+        description: "対象銘柄範囲。phase1_subset=10銘柄固定 / all=全銘柄（約4,400）"
+        required: false
+        type: choice
+        options:
+          - phase1_subset
+          - all
+        default: phase1_subset
 
   # --- 将来、日次自動実行を追加する場合は以下のコメントを外す ---
   # schedule:
@@ -16,7 +24,7 @@ on:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 40 # 取得期間拡大(62日)・財務データ取得・429リトライを考慮（実測で25分では不足したため延長）
+    timeout-minutes: 50 # 全銘柄モード(UNIVERSE_MODE=all)での実行も考慮し延長
     steps:
       - name: リポジトリをチェックアウト
         uses: actions/checkout@v4
@@ -35,6 +43,7 @@ jobs:
           CF_KV_NAMESPACE_ID: ${{ secrets.CF_KV_NAMESPACE_ID }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
           CUTOFF_DATE: ${{ inputs.cutoffDate }}
+          UNIVERSE_MODE: ${{ inputs.universeMode }}
         run: node src/pipeline.js
 
       # raw-data / normalized-data / features / screened / gemini-results / ranking の

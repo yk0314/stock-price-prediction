@@ -529,10 +529,56 @@ await test("screenToPool: 閾値未満は除外される", () => {
   const pool = screenToPool(features);
   assert.deepEqual(pool.map((f) => f.code), ["B"]);
 });
+await test("screenToPool: 株価がminPrice未満の銘柄(超低位株)は除外される", () => {
+  const features = [
+    { code: "LOW", priceChange5d: 10, volumeChange20d: 0, price: 50 }, // minPrice(100)未満
+    { code: "OK", priceChange5d: 10, volumeChange20d: 0, price: 500 },
+  ];
+  const pool = screenToPool(features);
+  assert.deepEqual(pool.map((f) => f.code), ["OK"]);
+});
+await test("screenToPool: 20日平均売買代金がminAvgTradingValueYen未満の銘柄(流動性不足)は除外される", () => {
+  const features = [
+    // price×volumeSma20 = 500×1000 = 50万円 → 閾値(5,000万円)未満で除外
+    { code: "ILLIQUID", priceChange5d: 10, volumeChange20d: 0, price: 500, volumeSma20: 1000 },
+    // price×volumeSma20 = 1000×100000 = 1億円 → 閾値以上で通過
+    { code: "LIQUID", priceChange5d: 10, volumeChange20d: 0, price: 1000, volumeSma20: 100000 },
+  ];
+  const pool = screenToPool(features);
+  assert.deepEqual(pool.map((f) => f.code), ["LIQUID"]);
+});
+await test("screenToPool: price/volumeSma20が無い(未計算の)特徴量は流動性フィルタでは除外しない", () => {
+  // 既存のシンプルな特徴量オブジェクト（price/volumeSma20を持たない）との後方互換性を確認
+  const features = [{ code: "A", priceChange5d: 5, volumeChange20d: 0 }];
+  const pool = screenToPool(features);
+  assert.deepEqual(pool.map((f) => f.code), ["A"]);
+});
 await test("selectGeminiCandidates: config.GEMINI.candidateCount件に絞る", () => {
   const pool = Array.from({ length: 50 }, (_, i) => ({ code: `C${i}`, priceChange5d: 10 - i }));
   const selected = selectGeminiCandidates(pool);
   assert.equal(selected.length, 10); // config.GEMINI.candidateCount のデフォルト値
+});
+await test("screenToPool: 4,400銘柄規模のデータでもエラーなく高速に動作する（全銘柄化の検証）", () => {
+  const features = Array.from({ length: 4400 }, (_, i) => ({
+    code: String(1000 + i),
+    priceChange5d: (i % 41) - 20, // -20〜+20の範囲でばらけさせる
+    priceChange20d: (i % 61) - 30,
+    volumeChange20d: (i % 101) - 50,
+    rsi14: i % 100,
+    price: 100 + (i % 5000),
+    volumeSma20: 1000 + (i % 500000),
+    relativeStrength20d: null,
+  }));
+  const start = Date.now();
+  const pool = screenToPool(features);
+  const elapsedMs = Date.now() - start;
+
+  assert.ok(pool.length <= config.SCREENING.poolSize, "poolSizeを超えてはいけない");
+  assert.ok(elapsedMs < 2000, `4,400件の処理に${elapsedMs}msかかっており遅すぎる`);
+  // スコア降順にソートされていることを確認
+  for (let i = 1; i < pool.length; i++) {
+    assert.ok(computeScreeningScore(pool[i - 1]) >= computeScreeningScore(pool[i]));
+  }
 });
 
 console.log("[test] backtest.js");

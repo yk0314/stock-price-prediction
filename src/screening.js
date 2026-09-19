@@ -43,31 +43,77 @@ export function computeScreeningScore(feature) {
  * (computeScreeningScore)でソートすることで、単純な値動きの大きさだけに
  * 偏らないようにしている。
  *
+ * 【短期売買向けの流動性フィルタ】数日〜1週間の短期売買を想定しているため、
+ * 売買代金が極端に少ない銘柄・株価が極端に低い銘柄は候補から除外する
+ * （config.SCREENING.minAvgTradingValueYen / minPrice で調整可能。値は仮設定）。
+ *
+ * 除外内訳は console.log でログ出力する（全銘柄運用時に、どのフィルタで
+ * 何件除外されたかを確認できるようにするため）。
+ *
  * @param {Array<object>} featureList - features.js の computeFeatures() の結果配列
  * @returns {Array<object>} スクリーニングプール（config.SCREENING.poolSize 件まで）
  */
 export function screenToPool(featureList) {
-  const { maxAbsVolumeChangePct, minAbsPriceChangePct5d, poolSize } =
+  const { maxAbsVolumeChangePct, minAbsPriceChangePct5d, minAvgTradingValueYen, minPrice, poolSize } =
     config.SCREENING;
 
   const valid = featureList.filter((f) => f !== null);
 
+  const excluded = {
+    total: valid.length,
+    byMissingMomentum: 0,
+    byLowMomentum: 0,
+    byVolumeAnomaly: 0,
+    byLowLiquidity: 0,
+    byLowPrice: 0,
+  };
+
   const filtered = valid.filter((f) => {
-    if (f.priceChange5d === null) return false;
-    if (Math.abs(f.priceChange5d) < minAbsPriceChangePct5d) return false;
+    if (f.priceChange5d === null) {
+      excluded.byMissingMomentum++;
+      return false;
+    }
+    if (Math.abs(f.priceChange5d) < minAbsPriceChangePct5d) {
+      excluded.byLowMomentum++;
+      return false;
+    }
     if (
       f.volumeChange20d !== null &&
       Math.abs(f.volumeChange20d) > maxAbsVolumeChangePct
     ) {
       // 出来高が異常値レベルで変化している銘柄はデータ異常の可能性があるため除外
+      excluded.byVolumeAnomaly++;
       return false;
+    }
+    if (f.price !== null && f.price !== undefined && f.price < minPrice) {
+      excluded.byLowPrice++;
+      return false;
+    }
+    if (
+      f.price !== null &&
+      f.price !== undefined &&
+      f.volumeSma20 !== null &&
+      f.volumeSma20 !== undefined
+    ) {
+      const avgTradingValueYen = f.price * f.volumeSma20;
+      if (avgTradingValueYen < minAvgTradingValueYen) {
+        excluded.byLowLiquidity++;
+        return false;
+      }
     }
     return true;
   });
 
   filtered.sort((a, b) => computeScreeningScore(b) - computeScreeningScore(a));
+  const pool = filtered.slice(0, poolSize);
 
-  return filtered.slice(0, poolSize);
+  console.log(
+    `[screening] 対象${excluded.total}銘柄 → 通過${filtered.length}銘柄 → プール${pool.length}銘柄` +
+      ` (除外内訳: モメンタムデータ無し=${excluded.byMissingMomentum}, 値動き小=${excluded.byLowMomentum},` +
+      ` 出来高異常=${excluded.byVolumeAnomaly}, 低位株=${excluded.byLowPrice}, 流動性不足=${excluded.byLowLiquidity})`
+  );
+
+  return pool;
 }
 
 /**
