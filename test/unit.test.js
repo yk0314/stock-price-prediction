@@ -716,7 +716,7 @@ await test("saveToD1: CF_D1_DATABASE_ID未設定ならスキップし、パイ�
     const { saveToD1 } = await import("../src/pipelineD1.js");
     const result = await saveToD1(
       { predictionExecutedAt: "2026-09-14T06:00:00Z", cutoffDate: "2026-09-13" },
-      { stocks: [], pricesByCode: {}, financialsByCode: new Map(), analysisResults: [] }
+      { stocks: [], pricesByCode: new Map(), financialsByCode: new Map(), analysisResults: [] }
     );
     assert.equal(result.enabled, false);
     assert.equal(result.aiEvaluations, 0);
@@ -743,7 +743,7 @@ await test("saveToD1: AI評価の3つの日付を正しく設定する", async (
       { predictionExecutedAt: "2026-09-14T06:00:00Z", cutoffDate: "2026-09-13" },
       {
         stocks: [{ code: "7203" }],
-        pricesByCode: { "7203": [{ date: "2026-09-13", close: 2800, volume: 100 }] },
+        pricesByCode: new Map([["7203", [{ date: "2026-09-13", close: 2800, volume: 100 }]]]),
         financialsByCode: new Map(),
         analysisResults: [
           {
@@ -761,6 +761,10 @@ await test("saveToD1: AI評価の3つの日付を正しく設定する", async (
     assert.equal(result.enabled, true);
     assert.equal(result.aiEvaluations, 1);
     assert.deepEqual(result.savedEvaluationIds, [7]);
+    // 【回帰テスト】以前、pricesByCodeをMapで渡しているのにsaveToD1内部で
+    // 再度Object.entries()変換していたため、常に0件保存になるバグがあった。
+    // 実際に1件書き込まれることを明示的に検証する。
+    assert.equal(result.stockPrices, 1, "stock_pricesが書き込まれていない(Map二重変換バグの回帰確認)");
 
     const aiInsert = capturedBodies.find((b) => b.sql.includes("INSERT INTO ai_evaluations"));
     assert.ok(aiInsert, "ai_evaluationsへのINSERTが実行されていない");
@@ -796,7 +800,7 @@ await test("saveToD1: 一部テーブルの保存が失敗しても他は継続�
       { predictionExecutedAt: "2026-09-14T06:00:00Z", cutoffDate: "2026-09-13" },
       {
         stocks: [{ code: "7203" }],
-        pricesByCode: { "7203": [{ date: "2026-09-13", close: 2800 }] },
+        pricesByCode: new Map([["7203", [{ date: "2026-09-13", close: 2800 }]]]),
         financialsByCode: new Map(),
         analysisResults: [
           { code: "7203", dataAsOf: "2026-09-13", score: 80, positiveFactors: [], negativeFactors: [] },

@@ -52,9 +52,13 @@ export async function saveToD1(meta, { stocks, pricesByCode, financialsByCode, a
     summary.failures.push({ stage: "stocks", error: err.message });
   }
 
-  // 株価履歴（pricesByCodeはオブジェクトなのでMapへ変換して渡す）
+  // 株価履歴。pricesByCodeは呼び出し側(pipeline.js)からMapとして渡される契約になっている。
+  // 【過去のバグ】以前はここで new Map(Object.entries(pricesByCode)) と二重変換していたため、
+  // 呼び出し側がMapを渡すよう変更された後もこの変換が残っており、
+  // Object.entries(Mapインスタンス) が常に空配列を返すことで stock_prices が常に0件保存になっていた
+  // （実データ検証で発覚）。pricesByCodeは常にMapとして扱い、ここでは変換しない。
   try {
-    summary.stockPrices = await saveStockPricesToD1(d1, new Map(Object.entries(pricesByCode)));
+    summary.stockPrices = await saveStockPricesToD1(d1, pricesByCode);
   } catch (err) {
     console.warn(`[pipeline] D1: stock_prices保存に失敗: ${err.message}`);
     summary.failures.push({ stage: "stock_prices", error: err.message });
