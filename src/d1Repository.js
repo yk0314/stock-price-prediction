@@ -84,10 +84,11 @@ export async function saveStocksToD1(d1, stocks) {
 export async function saveAiEvaluationToD1(d1, evaluation) {
   const sql = `INSERT INTO ai_evaluations (
       code, evaluation_date, data_as_of_date, generated_at,
-      score, rating, upside_probability, downside_risk, expected_return, confidence,
+      score, rating, risk, upside_probability, downside_risk, expected_return,
+      expected_holding_days, confidence,
       reasoning, summary, positive_factors, negative_factors, used_features,
       source, price_at_evaluation
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
   const params = [
     evaluation.code,
@@ -96,9 +97,11 @@ export async function saveAiEvaluationToD1(d1, evaluation) {
     evaluation.generatedAt,
     evaluation.score ?? null,
     evaluation.rating ?? null,
+    evaluation.risk ?? null,
     evaluation.upsideProbability ?? null,
     evaluation.downsideRisk ?? null,
     evaluation.expectedReturn ?? null,
+    evaluation.expectedHoldingDays ?? null,
     evaluation.confidence ?? null,
     evaluation.reasoning ?? null,
     evaluation.summary ?? null,

@@ -2,7 +2,14 @@
 // 重い処理は一切行わず、GitHub Actionsが書き込んだKVの値をそのまま返すだけにすることで、
 // Workers Free の CPU時間制限（10ms/リクエスト）にほぼ確実に収まるようにしている。
 //
-// バインディング: wrangler.toml で STOCK_KV という名前のKV Namespaceをバインドしている前提。
+// 例外: /api/ranking はD1(ai_evaluations)を参照する。1クエリで完結する軽量な読み取りのみを
+// 行い、KVエンドポイント群と同様にWorkers側では加工・集計処理を極力行わない設計を維持する。
+//
+// バインディング: wrangler.toml で STOCK_KV という名前のKV Namespace、
+// DBという名前のD1 Databaseをバインドしている前提。
+
+const DEFAULT_RANKING_LIMIT = 20;
+const MAX_RANKING_LIMIT = 100;
 
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -32,6 +39,86 @@ async function getJson(kv, key) {
   }
 }
 
+function safeParseJsonArray(text) {
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * ai_evaluations（D1）から、銘柄ごとに最新の1件だけをscore降順で取得する。
+ *
+ * 「最新」の判定は evaluation_date/generated_at ではなく id（AUTOINCREMENT）の最大値を使う。
+ * ai_evaluationsは追記専用でINSERTのみが行われるため、idの大小＝挿入順（＝新しさ）が
+ * 常に保証されており、タイムスタンプの精度や同一実行内での複数レコード発生などの
+ * エッジケースを気にする必要がない、最もシンプルで安全な「最新」の定義になる。
+ *
+ * Gemini分析が存在しない銘柄はそもそもai_evaluationsに行が無いため、
+ * 追加のフィルタなしで自然にランキング対象から除外される。
+ *
+ * stocksテーブルはname/marketが未取得の場合nullになりうる（LEFT JOINで欠損を許容する）。
+ */
+async function fetchRanking(db, limit) {
+  const { results } = await db
+    .prepare(
+      `SELECT
+         ae.code,
+         s.name AS stock_name,
+         ae.score,
+         ae.rating,
+         ae.risk,
+         ae.expected_return,
+         ae.expected_holding_days,
+         ae.upside_probability,
+         ae.downside_risk,
+         ae.confidence,
+         ae.reasoning,
+         ae.summary,
+         ae.positive_factors,
+         ae.negative_factors,
+         ae.evaluation_date,
+         ae.data_as_of_date,
+         ae.generated_at,
+         ae.price_at_evaluation
+       FROM ai_evaluations ae
+       INNER JOIN (
+         SELECT code, MAX(id) AS max_id
+         FROM ai_evaluations
+         GROUP BY code
+       ) latest ON ae.id = latest.max_id
+       LEFT JOIN stocks s ON s.code = ae.code
+       ORDER BY ae.score DESC
+       LIMIT ?`
+    )
+    .bind(limit)
+    .all();
+
+  return (results ?? []).map((row) => ({
+    code: row.code,
+    name: row.stock_name ?? null,
+    score: row.score,
+    rating: row.rating, // "BUY" | "HOLD" | "SELL"
+    risk: row.risk, // "LOW" | "MEDIUM" | "HIGH"
+    expectedReturn: row.expected_return,
+    expectedHoldingDays: row.expected_holding_days,
+    upsideProbability: row.upside_probability,
+    downsideRisk: row.downside_risk,
+    confidence: row.confidence,
+    reasoning: row.reasoning,
+    summary: row.summary,
+    positiveFactors: safeParseJsonArray(row.positive_factors),
+    negativeFactors: safeParseJsonArray(row.negative_factors),
+    evaluationDate: row.evaluation_date,
+    dataAsOfDate: row.data_as_of_date,
+    generatedAt: row.generated_at,
+    priceAtEvaluation: row.price_at_evaluation,
+  }));
+}
+
 export default {
   async fetch(request, env) {
     try {
@@ -48,10 +135,26 @@ export default {
         return jsonResponse(meta ?? {});
       }
 
-      // GET /api/ranking — AI評価ランキング
+      // GET /api/ranking — AI評価ランキング（D1のai_evaluationsを参照。銘柄ごとに最新評価のみ、score降順）
+      // クエリパラメータ: limit（省略時20件、上限100件）
       if (path === "/api/ranking") {
-        const ranking = await getJson(env.STOCK_KV, "ranking");
-        return jsonResponse(ranking ?? []);
+        if (!env.DB) {
+          // D1が未接続の環境では空配列を返す（KV系エンドポイントの「データなし時は[]」という
+          // 既存の振る舞いに合わせ、フロントエンド側の分岐を増やさないようにする）。
+          return jsonResponse([]);
+        }
+        const limitParam = Number.parseInt(url.searchParams.get("limit"), 10);
+        const limit =
+          Number.isFinite(limitParam) && limitParam > 0
+            ? Math.min(limitParam, MAX_RANKING_LIMIT)
+            : DEFAULT_RANKING_LIMIT;
+        try {
+          const ranking = await fetchRanking(env.DB, limit);
+          return jsonResponse(ranking);
+        } catch (err) {
+          console.error(`[worker] /api/ranking D1クエリ失敗: ${err.message}`);
+          return errorResponse(500);
+        }
       }
 
       // GET /api/stocks — 特徴量計算に成功した銘柄の一覧（コード・価格・データ基準日）

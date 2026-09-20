@@ -43,10 +43,14 @@ export async function saveToD1(meta, { stocks, pricesByCode, financialsByCode, a
     return summary;
   }
 
-  // 銘柄マスタ。現状のパイプラインでは銘柄名・市場を取得していないためcodeのみ保存する
-  // （名称・市場の取得はStep6以降で /v2/equities/master を使って拡張予定）。
+  // 銘柄マスタ。name/marketはStep6でjquants.fetchListedInfo()の結果をpipeline.js側で
+  // stocksに付与するようになったため、渡されたものをそのまま保存する
+  // （未取得の場合はs.name/s.marketがundefinedのままなのでnullとして保存される）。
   try {
-    summary.stocks = await saveStocksToD1(d1, stocks.map((s) => ({ code: s.code })));
+    summary.stocks = await saveStocksToD1(
+      d1,
+      stocks.map((s) => ({ code: s.code, name: s.name ?? null, market: s.market ?? null }))
+    );
   } catch (err) {
     console.warn(`[pipeline] D1: stocks保存に失敗: ${err.message}`);
     summary.failures.push({ stage: "stocks", error: err.message });
@@ -85,9 +89,11 @@ export async function saveToD1(meta, { stocks, pricesByCode, financialsByCode, a
       generatedAt: meta.predictionExecutedAt,
       score: r.score ?? null,
       rating: r.rating ?? null,
+      risk: r.risk ?? null,
       upsideProbability: r.upsideProbability ?? null,
       downsideRisk: r.downsideRisk ?? null,
       expectedReturn: r.expectedReturn ?? null,
+      expectedHoldingDays: r.expectedHoldingDays ?? null,
       confidence: r.confidence ?? null,
       reasoning: r.reasoning ?? null,
       summary: r.summary ?? null,
@@ -117,4 +123,3 @@ export async function saveToD1(meta, { stocks, pricesByCode, financialsByCode, a
   );
   return summary;
 }
-

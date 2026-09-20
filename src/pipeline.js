@@ -10,6 +10,7 @@ import { saveToD1 } from "./pipelineD1.js";
 import { writeArtifact } from "./artifacts.js";
 import { fetchTopixForRange, computeMarketFeatures, computeRelativeStrength } from "./market.js";
 import { buildAvailableFinancialsByCode } from "./financials.js";
+import { buildListedInfoByCode } from "./listedInfo.js";
 
 function addDaysUTC(dateStr, days) {
   const d = new Date(dateStr + "T00:00:00Z");
@@ -50,7 +51,7 @@ async function main() {
   console.log(`[pipeline] 開始: ${predictionExecutedAt} (UNIVERSE_MODE=${universeMode})`);
 
   // API呼び出し中に発生したエラー件数を種類別に集計する（検証項目「APIエラー数」用）。
-  const apiErrorCounts = { jquantsFinancials: 0, topix: 0, gemini429OrError: 0 };
+  const apiErrorCounts = { jquantsFinancials: 0, topix: 0, gemini429OrError: 0, listedInfo: 0 };
 
   // --- Stage 0: cutoffDate の決定（手動指定 or 自動計算） ---
   const manualCutoff = process.env.CUTOFF_DATE || undefined;
@@ -80,6 +81,21 @@ async function main() {
     );
     process.exitCode = 1;
     return;
+  }
+
+  // --- Stage 1.5: 銘柄マスタ(名称・市場区分) — /v2/equities/master を1回だけ呼ぶ ---
+  // 日付ベースの株価取得とは独立したエンドポイントで、銘柄ごとにループしない。
+  // 取得できなくても銘柄名が付かないだけで、パイプライン全体は継続できるようにする
+  // （ランキング等の中核機能はcode単位で成立するため、nameは補助的な表示用情報）。
+  let listedInfoByCode = new Map();
+  try {
+    const listedInfoRows = await jquants.fetchListedInfo();
+    listedInfoByCode = buildListedInfoByCode(listedInfoRows);
+    console.log(`[pipeline] listedInfo(銘柄マスタ): ${listedInfoByCode.size}銘柄分の名称・市場区分を取得`);
+    await writeArtifact("listed-info.json", listedInfoRows.slice(0, 5));
+  } catch (err) {
+    apiErrorCounts.listedInfo++;
+    console.warn(`[pipeline] 銘柄マスタ取得に失敗したため、銘柄名は付与されないまま続行: ${err.message}`);
   }
 
   // --- Stage 2: normalized data — 共通スキーマへの正規化 + 銘柄コードごとにグルーピング ---
@@ -197,11 +213,16 @@ async function main() {
   // 銘柄一覧（KV向け。1件のJSON blobとして保存するため、プールに関わらず
   // 特徴量が計算できた全銘柄分を含めてよい。全銘柄運用時は数千件になりうるが、
   // KVの1バリューあたりの上限(25MB)には収まる想定で、書き込み回数も1回のまま増えない）。
-  const stocks = featureList.map((f) => ({
-    code: f.code,
-    price: f.price,
-    dataAsOf: f.dataAsOf,
-  }));
+  const stocks = featureList.map((f) => {
+    const info = listedInfoByCode.get(f.code);
+    return {
+      code: f.code,
+      price: f.price,
+      dataAsOf: f.dataAsOf,
+      name: info?.name ?? null,
+      market: info?.market ?? null,
+    };
+  });
 
   // 簡易株価(prices:{code})はコードごとに個別キーとして書き込むため、
   // 全銘柄分(grouped)を書き込むとKV無料枠の1日1,000書き込み上限を超過してしまう
@@ -234,6 +255,7 @@ async function main() {
     geminiCandidateCount: geminiCandidates.length,
     analyzedCount: analysisResults.length,
     financialsFetchedCount: financialsByCode.size,
+    listedInfoCount: listedInfoByCode.size,
     topixChangeNd,
     apiErrorCounts,
   };

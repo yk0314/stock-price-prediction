@@ -815,6 +815,37 @@ await test("saveToD1: 一部テーブルの保存が失敗しても他は継続�
     global.fetch = originalFetch;
   }
 });
+await test("saveToD1: stocksにname/marketが含まれる場合はそのままstocksテーブルへ渡す（銘柄マスタ対応）", async () => {
+  process.env.CF_ACCOUNT_ID = "acc";
+  process.env.CF_D1_DATABASE_ID = "db";
+  process.env.CF_API_TOKEN = "tok";
+  const originalFetch = global.fetch;
+  const capturedBodies = [];
+  global.fetch = async (url, opts) => {
+    capturedBodies.push(JSON.parse(opts.body));
+    return new Response(
+      JSON.stringify({ success: true, result: [{ results: [], meta: { last_row_id: 1 } }] }),
+      { status: 200 }
+    );
+  };
+  try {
+    const { saveToD1 } = await import("../src/pipelineD1.js");
+    await saveToD1(
+      { predictionExecutedAt: "2026-09-14T06:00:00Z", cutoffDate: "2026-09-13" },
+      {
+        stocks: [{ code: "7203", name: "トヨタ自動車", market: "プライム" }],
+        pricesByCode: new Map(),
+        financialsByCode: new Map(),
+        analysisResults: [],
+      }
+    );
+    const stocksInsert = capturedBodies.find((b) => b.sql.includes("INSERT OR REPLACE INTO stocks"));
+    assert.ok(stocksInsert, "stocksへのINSERTが実行されていない");
+    assert.deepEqual(stocksInsert.params, ["7203", "トヨタ自動車", "プライム", stocksInsert.params[3]]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
 
 console.log("[test] d1Repository.js");
 await test("saveStockPricesToD1: Mapを行配列に変換してbatchInsertする", async () => {
@@ -838,11 +869,15 @@ await test("saveStockPricesToD1: Mapを行配列に変換してbatchInsertする
   assert.equal(capturedRows[0][0], "7203");
   assert.equal(capturedRows[0][5], 2800); // close
 });
-await test("saveAiEvaluationToD1: 3つの日付フィールドを分けて保存し、idを返す", async () => {
+await test("saveAiEvaluationToD1: risk・expected_holding_daysを含む全フィールドを分けて保存し、idを返す", async () => {
+  // 【Phase2追加】0002マイグレーションでai_evaluationsにrisk/expected_holding_daysカラムを
+  // 追加したことに伴い、列の並び順が変わっている（risk/expected_holding_daysが挿入された分、
+  // 後続の列のインデックスが後ろにずれる）。この並びがSQL文と実際にズレていないことを確認する。
   const { saveAiEvaluationToD1 } = await import("../src/d1Repository.js");
-  let capturedParams;
+  let capturedParams, capturedSql;
   const fakeD1 = {
     async run(sql, params) {
+      capturedSql = sql;
       capturedParams = params;
       assert.ok(sql.includes("INSERT INTO ai_evaluations"));
       return { results: [], meta: { last_row_id: 42 } };
@@ -855,15 +890,25 @@ await test("saveAiEvaluationToD1: 3つの日付フィールドを分けて保存
     generatedAt: "2026-09-14T06:00:00Z",
     score: 82,
     rating: "BUY",
+    risk: "MEDIUM",
+    upsideProbability: 60,
+    downsideRisk: 40,
+    expectedReturn: 3.5,
+    expectedHoldingDays: 5,
+    confidence: 70,
     positiveFactors: ["a"],
     negativeFactors: [],
     usedFeatures: { x: 1 },
   });
   assert.equal(id, 42);
+  assert.ok(capturedSql.includes("risk"));
+  assert.ok(capturedSql.includes("expected_holding_days"));
   assert.equal(capturedParams[1], "2026-09-14"); // evaluation_date
   assert.equal(capturedParams[2], "2026-09-13"); // data_as_of_date
   assert.equal(capturedParams[3], "2026-09-14T06:00:00Z"); // generated_at
-  assert.equal(capturedParams[12], '["a"]'); // positive_factors(JSON文字列)
+  assert.equal(capturedParams[6], "MEDIUM"); // risk
+  assert.equal(capturedParams[10], 5); // expected_holding_days
+  assert.equal(capturedParams[14], '["a"]'); // positive_factors(JSON文字列。risk/expected_holding_days追加でインデックスが12→14にずれた)
 });
 await test("saveAiEvaluationsToD1: 1件失敗しても残りは継続する", async () => {
   const { saveAiEvaluationsToD1 } = await import("../src/d1Repository.js");
@@ -1112,6 +1157,198 @@ await test("resolveEffectiveCutoffDate: 未指定なら自動検出した最新�
   } finally {
     global.fetch = originalFetch;
   }
+});
+
+console.log("[test] listedInfo.js (Phase2: 銘柄マスタ正規化)");
+await test("normalizeListedInfoRow: 標準的なキー名を正規化し、5桁コードは4桁化する", async () => {
+  const { normalizeListedInfoRow } = await import("../src/listedInfo.js");
+  const row = normalizeListedInfoRow({
+    Code: "72030",
+    CompanyName: "トヨタ自動車",
+    MarketCodeName: "プライム",
+  });
+  assert.deepEqual(row, { code: "7203", name: "トヨタ自動車", market: "プライム" });
+});
+await test("normalizeListedInfoRow: codeが取得できない行はnull", async () => {
+  const { normalizeListedInfoRow } = await import("../src/listedInfo.js");
+  assert.equal(normalizeListedInfoRow({ CompanyName: "不明" }), null);
+});
+await test("buildListedInfoByCode: 配列をcode単位のMapに変換する", async () => {
+  const { buildListedInfoByCode } = await import("../src/listedInfo.js");
+  const map = buildListedInfoByCode([
+    { Code: "72030", CompanyName: "トヨタ自動車", MarketCodeName: "プライム" },
+    { Code: "67580", CompanyName: "ソニーグループ", MarketCodeName: "プライム" },
+  ]);
+  assert.equal(map.size, 2);
+  assert.equal(map.get("7203").name, "トヨタ自動車");
+  assert.equal(map.get("6758").name, "ソニーグループ");
+});
+await test("buildListedInfoByCode: 空・未定義配列は空のMapを返す", async () => {
+  const { buildListedInfoByCode } = await import("../src/listedInfo.js");
+  assert.equal(buildListedInfoByCode([]).size, 0);
+  assert.equal(buildListedInfoByCode(undefined).size, 0);
+});
+
+console.log("[test] worker/src/index.js (/api/ranking)");
+
+/**
+ * env.DB用のフェイクD1バインディング。
+ * prepare(sql).bind(...args).all()/.first()/.run() というCloudflare D1ネイティブAPIの
+ * インターフェースだけを最小限に再現する。
+ */
+function makeFakeD1Binding({ rankingRows = [], shouldThrow = false } = {}) {
+  return {
+    prepare(sql) {
+      const statement = {
+        sql,
+        args: [],
+        bind(...args) {
+          statement.args = args;
+          return statement;
+        },
+        async all() {
+          if (shouldThrow) throw new Error("D1 query failed (test)");
+          if (sql.includes("FROM ai_evaluations")) {
+            return { results: rankingRows };
+          }
+          return { results: [] };
+        },
+        async first() {
+          return null;
+        },
+        async run() {
+          return { meta: { last_row_id: 1 } };
+        },
+      };
+      return statement;
+    },
+  };
+}
+
+await test("/api/ranking: D1のai_evaluationsからscore降順のランキングを返す", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const fakeDb = makeFakeD1Binding({
+    rankingRows: [
+      {
+        code: "7203",
+        stock_name: "トヨタ自動車",
+        score: 90,
+        rating: "BUY",
+        risk: "MEDIUM",
+        expected_return: 3.2,
+        expected_holding_days: 5,
+        upside_probability: 65,
+        downside_risk: 30,
+        confidence: 70,
+        reasoning: "reason",
+        summary: "summary",
+        positive_factors: '["good news"]',
+        negative_factors: "[]",
+        evaluation_date: "2026-09-20",
+        data_as_of_date: "2026-09-19",
+        generated_at: "2026-09-20T06:00:00Z",
+        price_at_evaluation: 2800,
+      },
+    ],
+  });
+  const res = await worker.fetch(new Request("https://example.com/api/ranking"), { DB: fakeDb });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.length, 1);
+  assert.equal(body[0].code, "7203");
+  assert.equal(body[0].name, "トヨタ自動車");
+  assert.equal(body[0].rating, "BUY");
+  assert.equal(body[0].risk, "MEDIUM"); // risk(LOW/MEDIUM/HIGH)が正しく返る
+  assert.equal(body[0].expectedHoldingDays, 5); // expectedHoldingDaysが正しく返る
+  assert.deepEqual(body[0].positiveFactors, ["good news"]); // JSON文字列がパースされて配列で返る
+});
+
+await test("/api/ranking: SQLが銘柄ごとに最新(MAX id)のみをscore降順で選ぶ構造になっている", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  let capturedSql = null;
+  const fakeDb = {
+    prepare(sql) {
+      capturedSql = sql;
+      const statement = {
+        bind: () => statement,
+        all: async () => ({ results: [] }),
+      };
+      return statement;
+    },
+  };
+  await worker.fetch(new Request("https://example.com/api/ranking"), { DB: fakeDb });
+  assert.ok(capturedSql.includes("FROM ai_evaluations"));
+  assert.ok(capturedSql.includes("MAX(id)"));
+  assert.ok(capturedSql.includes("GROUP BY code"));
+  assert.ok(capturedSql.includes("ORDER BY ae.score DESC"));
+  assert.ok(capturedSql.includes("LEFT JOIN stocks"));
+});
+
+await test("/api/ranking: limitパラメータがD1へのbind引数に反映される（上限100件でキャップ）", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  let capturedArgs = null;
+  const fakeDb = {
+    prepare(sql) {
+      const statement = {
+        bind: (...args) => {
+          capturedArgs = args;
+          return statement;
+        },
+        all: async () => ({ results: [] }),
+      };
+      return statement;
+    },
+  };
+  await worker.fetch(new Request("https://example.com/api/ranking?limit=5"), { DB: fakeDb });
+  assert.deepEqual(capturedArgs, [5]);
+
+  await worker.fetch(new Request("https://example.com/api/ranking?limit=999"), { DB: fakeDb });
+  assert.deepEqual(capturedArgs, [100]); // MAX_RANKING_LIMIT(100)でキャップされる
+
+  await worker.fetch(new Request("https://example.com/api/ranking"), { DB: fakeDb });
+  assert.deepEqual(capturedArgs, [20]); // limit未指定時のデフォルト(DEFAULT_RANKING_LIMIT)
+});
+
+await test("/api/ranking: Gemini分析が存在しない銘柄(ai_evaluationsに行が無い)は自然に除外される", async () => {
+  // ai_evaluationsに行が無い＝そもそもfakeDbのrankingRowsに含まれない、という状態で
+  // 追加のフィルタなしに空配列が返ることを確認する（除外ロジックが不要であることの裏付け）。
+  const worker = (await import("../worker/src/index.js")).default;
+  const fakeDb = makeFakeD1Binding({ rankingRows: [] });
+  const res = await worker.fetch(new Request("https://example.com/api/ranking"), { DB: fakeDb });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(body, []);
+});
+
+await test("/api/ranking: env.DBが未設定でもクラッシュせず空配列を返す", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const res = await worker.fetch(new Request("https://example.com/api/ranking"), {});
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(body, []);
+});
+
+await test("/api/ranking: D1クエリが失敗した場合は500エラーを返す（技術的詳細は含めない）", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const fakeDb = makeFakeD1Binding({ shouldThrow: true });
+  const res = await worker.fetch(new Request("https://example.com/api/ranking"), { DB: fakeDb });
+  assert.equal(res.status, 500);
+  const body = await res.json();
+  assert.ok(body.error);
+});
+
+await test("/api/ranking: 他の既存エンドポイント(/api/meta)は引き続きKVから正しく返す（回帰確認）", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const fakeKv = {
+    async get(key) {
+      if (key === "meta") return JSON.stringify({ cutoffDate: "2026-09-19" });
+      return null;
+    },
+  };
+  const res = await worker.fetch(new Request("https://example.com/api/meta"), { STOCK_KV: fakeKv });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.cutoffDate, "2026-09-19");
 });
 
 console.log(`\n[test] ${passed}件成功`);
