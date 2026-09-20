@@ -194,15 +194,25 @@ async function main() {
     analysisByCode[result.code] = result;
   }
 
-  // 銘柄一覧・簡易株価（KV向け。プールに関わらず特徴量が計算できた全銘柄分。
-  // 全銘柄運用時は数千件になりうるが、KVの1バリューあたりの上限(25MB)には収まる想定）。
+  // 銘柄一覧（KV向け。1件のJSON blobとして保存するため、プールに関わらず
+  // 特徴量が計算できた全銘柄分を含めてよい。全銘柄運用時は数千件になりうるが、
+  // KVの1バリューあたりの上限(25MB)には収まる想定で、書き込み回数も1回のまま増えない）。
   const stocks = featureList.map((f) => ({
     code: f.code,
     price: f.price,
     dataAsOf: f.dataAsOf,
   }));
+
+  // 簡易株価(prices:{code})はコードごとに個別キーとして書き込むため、
+  // 全銘柄分(grouped)を書き込むとKV無料枠の1日1,000書き込み上限を超過してしまう
+  // （全銘柄モードでは実際に約3,900件書き込もうとして429エラーが発生した）。
+  // D1向け保存(Stage 8)と同じ方針で、スクリーニングプール(pool)に残った銘柄のみに限定する。
+  // poolCodesはStage 8のD1向けフィルタでも再利用する。
+  const poolCodes = new Set(pool.map((p) => p.code));
   const pricesByCode = {};
-  for (const [code, rows] of grouped.entries()) {
+  for (const code of poolCodes) {
+    const rows = grouped.get(code);
+    if (!rows) continue;
     // features.js が実際に参照するウィンドウ（最新+N営業日前まで）と一致させる
     pricesByCode[code] = rows.slice(-(config.FEATURE_LOOKBACK_TRADING_DAYS + 1));
   }
@@ -244,11 +254,10 @@ async function main() {
   // 理由: D1は1クエリあたり100バインド変数までという制約があり、全銘柄×約41日分の
   // 生データをそのまま書き込もうとすると数万行規模になり、書き込みリクエスト数・
   // 処理時間の両面で非現実的になるため。プール銘柄程度の規模であれば無理なく収まる。
-  // KVへの保存（全銘柄分のサマリ）はこの制限を受けず、上記Stage 7の通り全銘柄分を保存している。
-  const poolCodes = new Set(pool.map((p) => p.code));
-  const pricesByCodeForD1 = new Map(
-    Object.entries(pricesByCode).filter(([code]) => poolCodes.has(code))
-  );
+  // KVのprices:{code}もStage 7で同じくプール限定に修正済み（KV無料枠1日1,000書き込み対策）。
+  // stocks（銘柄一覧のサマリ）だけは1件のJSON blobとして保存するため、全銘柄分を含めてよい。
+  // poolCodesはStage 7で定義済み。pricesByCodeも既にプール限定で作成済みなのでそのままMap化する。
+  const pricesByCodeForD1 = new Map(Object.entries(pricesByCode));
   const stocksForD1 = stocks.filter((s) => poolCodes.has(s.code));
 
   const d1Summary = await saveToD1(meta, {
