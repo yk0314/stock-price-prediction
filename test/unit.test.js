@@ -1160,7 +1160,28 @@ await test("resolveEffectiveCutoffDate: 未指定なら自動検出した最新�
 });
 
 console.log("[test] listedInfo.js (Phase2: 銘柄マスタ正規化)");
-await test("normalizeListedInfoRow: 標準的なキー名を正規化し、5桁コードは4桁化する", async () => {
+await test("normalizeListedInfoRow: 実際のJ-Quants V2レスポンス形式(CoName/MktNm)を正規化する", async () => {
+  // 2026-09、13010(極洋)の実データで確認した本物のレスポンス形式
+  const { normalizeListedInfoRow } = await import("../src/listedInfo.js");
+  const row = normalizeListedInfoRow({
+    Date: "2026-06-26",
+    Code: "13010",
+    CoName: "極洋",
+    CoNameEn: "KYOKUYO CO.,LTD.",
+    S17: "1",
+    S17Nm: "食品",
+    S33: "0050",
+    S33Nm: "水産・農林業",
+    ScaleCat: "TOPIX Small 1",
+    Mkt: "0111",
+    MktNm: "プライム",
+    Mrgn: "2",
+    MrgnNm: "貸借",
+    ProdCat: "011",
+  });
+  assert.deepEqual(row, { code: "1301", name: "極洋", market: "プライム" });
+});
+await test("normalizeListedInfoRow: フォールバック候補のキー名でも正規化できる", async () => {
   const { normalizeListedInfoRow } = await import("../src/listedInfo.js");
   const row = normalizeListedInfoRow({
     Code: "72030",

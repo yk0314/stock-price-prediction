@@ -1,11 +1,10 @@
 // J-Quants /v2/equities/master（上場銘柄一覧）のレスポンスを正規化するモジュール。
 //
-// 【重要】financials.jsのケースと同様、J-Quants V2の実際のレスポンスの項目名は
-// ドキュメントだけでは確定できず、実データで検証するまでは推測にならざるを得ない。
-// そのため、想定される複数の候補キー名を順に試すフォールバック方式にしている。
-// 初回の実行後、GitHub Actionsのログ・artifacts/listed-info.json（呼び出し側で保存する想定）で
-// 実際のレスポンス形式を確認し、必要であれば候補キーを追加・修正すること
-// （過去に財務データのフィールド名(Sales/OP/OdP/NP/EqAR等)で同様の検証が必要だった経緯がある）。
+// 実データで確認した本物のキー名（2026-09、13010=極洋のレスポンスで確認）:
+//   Code, CoName(日本語社名), CoNameEn(英語社名), Mkt(市場区分コード), MktNm(市場区分名) 等
+// これらを最優先の候補キーとして採用している。それ以外の候補キーは、
+// 万一将来レスポンス形式が変わった場合のフォールバックとして残してある
+// （financials.jsで実際にV1形式のフォールバックが使われた前例に倣った設計）。
 
 function pick(row, keys) {
   for (const key of keys) {
@@ -37,6 +36,7 @@ export function normalizeListedInfoRow(row) {
   if (!code) return null;
 
   const name = pick(row, [
+    "CoName", // 実データで確認した本物のキー名（2026-09、13010=極洋で確認）
     "CompanyName",
     "CompanyNameJapanese",
     "CompanyNameJP",
@@ -45,6 +45,7 @@ export function normalizeListedInfoRow(row) {
   ]);
 
   const market = pick(row, [
+    "MktNm", // 実データで確認した本物のキー名
     "MarketCodeName",
     "MarketCode",
     "Market",
