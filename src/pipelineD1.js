@@ -47,13 +47,10 @@ export async function saveToD1(meta, { stocks, pricesByCode, financialsByCode, a
   // stocksに付与するようになったため、渡されたものをそのまま保存する
   // （未取得の場合はs.name/s.marketがundefinedのままなのでnullとして保存される）。
   try {
-    const stocksToSave = stocks.map((s) => ({ code: s.code, name: s.name ?? null, market: s.market ?? null }));
-    // ▼▼▼ 一時デバッグ（原因特定用。確認後に削除すること） ▼▼▼
-    console.log(`[DEBUG-D1] saveToD1が受け取ったstocks.length = ${stocks.length}`);
-    console.log(`[DEBUG-D1] saveToD1が受け取ったstocks先頭3件 =`, stocks.slice(0, 3));
-    console.log(`[DEBUG-D1] saveStocksToD1へ渡すstocksToSave先頭3件 =`, stocksToSave.slice(0, 3));
-    // ▲▲▲ 一時デバッグここまで ▲▲▲
-    summary.stocks = await saveStocksToD1(d1, stocksToSave);
+    summary.stocks = await saveStocksToD1(
+      d1,
+      stocks.map((s) => ({ code: s.code, name: s.name ?? null, market: s.market ?? null }))
+    );
   } catch (err) {
     console.warn(`[pipeline] D1: stocks保存に失敗: ${err.message}`);
     summary.failures.push({ stage: "stocks", error: err.message });
