@@ -224,6 +224,17 @@ async function main() {
     };
   });
 
+  // ▼▼▼ 一時デバッグ（原因特定用。確認後に削除すること） ▼▼▼
+  const namedCount = stocks.filter((s) => s.name !== null).length;
+  console.log(`[DEBUG] stocks: ${stocks.length}件中 ${namedCount}件にnameが設定された`);
+  console.log(`[DEBUG] listedInfoByCode.size = ${listedInfoByCode.size}`);
+  console.log(`[DEBUG] listedInfoByCode.get("1301") =`, listedInfoByCode.get("1301"));
+  console.log(`[DEBUG] listedInfoByCode 先頭3件 =`, [...listedInfoByCode.entries()].slice(0, 3));
+  console.log(`[DEBUG] stocks内のcode=1301 =`, stocks.find((s) => s.code === "1301"));
+  console.log(`[DEBUG] featureList先頭3件のcode =`, featureList.slice(0, 3).map((f) => f.code));
+  // ▲▲▲ 一時デバッグここまで ▲▲▲
+
+
   // 簡易株価(prices:{code})はコードごとに個別キーとして書き込むため、
   // 全銘柄分(grouped)を書き込むとKV無料枠の1日1,000書き込み上限を超過してしまう
   // （全銘柄モードでは実際に約3,900件書き込もうとして429エラーが発生した）。
