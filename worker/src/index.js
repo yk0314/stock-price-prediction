@@ -2,8 +2,9 @@
 // 重い処理は一切行わず、GitHub Actionsが書き込んだKVの値をそのまま返すだけにすることで、
 // Workers Free の CPU時間制限（10ms/リクエスト）にほぼ確実に収まるようにしている。
 //
-// 例外: /api/ranking はD1(ai_evaluations)を参照する。1クエリで完結する軽量な読み取りのみを
-// 行い、KVエンドポイント群と同様にWorkers側では加工・集計処理を極力行わない設計を維持する。
+// 例外: /api/ranking, /api/stocks/:code, /api/stocks/:code/prices はD1を参照する。
+// いずれも1クエリで完結する軽量な読み取りのみを行い、KVエンドポイント群と同様に
+// Workers側では加工・集計処理を極力行わない設計を維持する。
 //
 // バインディング: wrangler.toml で STOCK_KV という名前のKV Namespace、
 // DBという名前のD1 Databaseをバインドしている前提。
@@ -50,54 +51,11 @@ function safeParseJsonArray(text) {
 }
 
 /**
- * ai_evaluations（D1）から、銘柄ごとに最新の1件だけをscore降順で取得する。
- *
- * 「最新」の判定は evaluation_date/generated_at ではなく id（AUTOINCREMENT）の最大値を使う。
- * ai_evaluationsは追記専用でINSERTのみが行われるため、idの大小＝挿入順（＝新しさ）が
- * 常に保証されており、タイムスタンプの精度や同一実行内での複数レコード発生などの
- * エッジケースを気にする必要がない、最もシンプルで安全な「最新」の定義になる。
- *
- * Gemini分析が存在しない銘柄はそもそもai_evaluationsに行が無いため、
- * 追加のフィルタなしで自然にランキング対象から除外される。
- *
- * stocksテーブルはname/marketが未取得の場合nullになりうる（LEFT JOINで欠損を許容する）。
+ * ai_evaluationsの1行(+LEFT JOINしたstocks.name)を、APIレスポンス用の形に変換する。
+ * fetchRanking()と/api/stocks/:codeの両方から共通で使う。
  */
-async function fetchRanking(db, limit) {
-  const { results } = await db
-    .prepare(
-      `SELECT
-         ae.code,
-         s.name AS stock_name,
-         ae.score,
-         ae.rating,
-         ae.risk,
-         ae.expected_return,
-         ae.expected_holding_days,
-         ae.upside_probability,
-         ae.downside_risk,
-         ae.confidence,
-         ae.reasoning,
-         ae.summary,
-         ae.positive_factors,
-         ae.negative_factors,
-         ae.evaluation_date,
-         ae.data_as_of_date,
-         ae.generated_at,
-         ae.price_at_evaluation
-       FROM ai_evaluations ae
-       INNER JOIN (
-         SELECT code, MAX(id) AS max_id
-         FROM ai_evaluations
-         GROUP BY code
-       ) latest ON ae.id = latest.max_id
-       LEFT JOIN stocks s ON s.code = ae.code
-       ORDER BY ae.score DESC
-       LIMIT ?`
-    )
-    .bind(limit)
-    .all();
-
-  return (results ?? []).map((row) => ({
+function mapEvaluationRow(row) {
+  return {
     code: row.code,
     name: row.stock_name ?? null,
     score: row.score,
@@ -116,6 +74,108 @@ async function fetchRanking(db, limit) {
     dataAsOfDate: row.data_as_of_date,
     generatedAt: row.generated_at,
     priceAtEvaluation: row.price_at_evaluation,
+  };
+}
+
+const EVALUATION_COLUMNS = `
+  ae.code,
+  s.name AS stock_name,
+  ae.score,
+  ae.rating,
+  ae.risk,
+  ae.expected_return,
+  ae.expected_holding_days,
+  ae.upside_probability,
+  ae.downside_risk,
+  ae.confidence,
+  ae.reasoning,
+  ae.summary,
+  ae.positive_factors,
+  ae.negative_factors,
+  ae.evaluation_date,
+  ae.data_as_of_date,
+  ae.generated_at,
+  ae.price_at_evaluation
+`;
+
+/**
+ * ai_evaluations（D1）から、銘柄ごとに最新の1件だけをscore降順で取得する。
+ *
+ * 「最新」の判定は evaluation_date/generated_at ではなく id（AUTOINCREMENT）の最大値を使う。
+ * ai_evaluationsは追記専用でINSERTのみが行われるため、idの大小＝挿入順（＝新しさ）が
+ * 常に保証されており、タイムスタンプの精度や同一実行内での複数レコード発生などの
+ * エッジケースを気にする必要がない、最もシンプルで安全な「最新」の定義になる。
+ *
+ * Gemini分析が存在しない銘柄はそもそもai_evaluationsに行が無いため、
+ * 追加のフィルタなしで自然にランキング対象から除外される。
+ *
+ * stocksテーブルはname/marketが未取得の場合nullになりうる（LEFT JOINで欠損を許容する）。
+ */
+async function fetchRanking(db, limit) {
+  const { results } = await db
+    .prepare(
+      `SELECT ${EVALUATION_COLUMNS}
+       FROM ai_evaluations ae
+       INNER JOIN (
+         SELECT code, MAX(id) AS max_id
+         FROM ai_evaluations
+         GROUP BY code
+       ) latest ON ae.id = latest.max_id
+       LEFT JOIN stocks s ON s.code = ae.code
+       ORDER BY ae.score DESC
+       LIMIT ?`
+    )
+    .bind(limit)
+    .all();
+
+  return (results ?? []).map(mapEvaluationRow);
+}
+
+/**
+ * 指定した1銘柄について、ai_evaluationsの最新1件を取得する（無ければnull）。
+ * fetchRanking()と違い対象がcode1件だけなので、MAX(id)のGROUP BYではなく
+ * ORDER BY id DESC LIMIT 1で十分（結果は同じだがシンプルで軽量）。
+ */
+async function fetchLatestEvaluationForCode(db, code) {
+  const row = await db
+    .prepare(
+      `SELECT ${EVALUATION_COLUMNS}
+       FROM ai_evaluations ae
+       LEFT JOIN stocks s ON s.code = ae.code
+       WHERE ae.code = ?
+       ORDER BY ae.id DESC
+       LIMIT 1`
+    )
+    .bind(code)
+    .first();
+
+  return row ? mapEvaluationRow(row) : null;
+}
+
+/**
+ * 指定した1銘柄の株価履歴をD1(stock_prices)から日付昇順で取得する。
+ * stock_pricesはスクリーニングプールに残った銘柄のみ・直近
+ * config.FEATURE_LOOKBACK_TRADING_DAYS+1営業日分しか保存されていない
+ * （pipeline.js側の設計上の制約。ここでは変更しない）。
+ */
+async function fetchStockPricesFromD1(db, code) {
+  const { results } = await db
+    .prepare(
+      `SELECT date, open, high, low, close, volume
+       FROM stock_prices
+       WHERE code = ?
+       ORDER BY date ASC`
+    )
+    .bind(code)
+    .all();
+
+  return (results ?? []).map((row) => ({
+    date: row.date,
+    open: row.open,
+    high: row.high,
+    low: row.low,
+    close: row.close,
+    volume: row.volume,
   }));
 }
 
@@ -218,7 +278,13 @@ export default {
         }
       }
 
-      // GET /api/stocks/:code — 個別銘柄の基本情報（stocks一覧から検索）
+      // GET /api/stocks/:code — 個別銘柄の詳細（KVの基本情報 + D1の最新AI評価をまとめて返す）
+      // 基本情報(code/name/market/price/dataAsOf)は従来通りKVのstocks一覧から取得する
+      // （全銘柄分を含む一覧なので、Gemini未分析の銘柄でもここは取れる）。
+      // latestEvaluationはD1のai_evaluationsから取得し、Gemini分析済みの銘柄のみ値が入る
+      // （分析が無ければnull。/api/stocks/:code/analysis はKVの直近1回実行分をそのまま返す
+      //  従来のエンドポイントとして残してあるが、D1を参照するこちらの方が
+      //  「銘柄ごとに最新の評価」という意味では一貫性がある）。
       const stockMatch = path.match(/^\/api\/stocks\/([^/]+)$/);
       if (stockMatch) {
         const code = stockMatch[1];
@@ -227,15 +293,51 @@ export default {
         if (!stock) {
           return jsonResponse({ error: "この銘柄コードは見つかりませんでした。" }, 404);
         }
-        return jsonResponse(stock);
+
+        let latestEvaluation = null;
+        if (env.DB) {
+          try {
+            latestEvaluation = await fetchLatestEvaluationForCode(env.DB, code);
+          } catch (err) {
+            // AI評価が取れなくても、基本情報だけは返せた方がフロントにとって有用なため、
+            // ここでは500にせずlatestEvaluation:nullのまま返す（エラーはログにのみ残す）。
+            console.error(`[worker] /api/stocks/:code D1クエリ失敗 code=${code}: ${err.message}`);
+          }
+        }
+
+        return jsonResponse({
+          code: stock.code,
+          name: stock.name ?? null,
+          market: stock.market ?? null,
+          price: stock.price,
+          dataAsOf: stock.dataAsOf,
+          latestEvaluation,
+        });
       }
 
-      // GET /api/stocks/:code/prices — 直近の簡易株価データ
+      // GET /api/stocks/:code/prices — 株価履歴。D1のstock_pricesを正とする。
+      // stock_pricesはスクリーニングプール銘柄のみ・直近約41営業日分しか保存されていない
+      // （pipeline.js Stage8の設計上の制約。ここでは変更しない）。
+      // D1未接続、または該当銘柄がプール外でD1に無い場合は、
+      // 従来通りKVのprices:{code}（同じくプール限定・キャッシュ用途）にフォールバックする。
       const pricesMatch = path.match(/^\/api\/stocks\/([^/]+)\/prices$/);
       if (pricesMatch) {
         const code = pricesMatch[1];
-        const prices = await getJson(env.STOCK_KV, `prices:${code}`);
-        return jsonResponse(prices ?? []);
+
+        if (env.DB) {
+          try {
+            const pricesFromD1 = await fetchStockPricesFromD1(env.DB, code);
+            if (pricesFromD1.length > 0) {
+              return jsonResponse(pricesFromD1);
+            }
+          } catch (err) {
+            console.error(`[worker] /api/stocks/:code/prices D1クエリ失敗 code=${code}: ${err.message}`);
+            // D1がエラーでも即500にはせず、KVへのフォールバックを試みる
+          }
+        }
+
+        const pricesFromKv = await getJson(env.STOCK_KV, `prices:${code}`);
+        return jsonResponse(pricesFromKv ?? []);
       }
 
       // GET /api/stocks/:code/analysis — Gemini分析結果（あれば）

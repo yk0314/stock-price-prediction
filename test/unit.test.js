@@ -1217,7 +1217,14 @@ console.log("[test] worker/src/index.js (/api/ranking)");
  * prepare(sql).bind(...args).all()/.first()/.run() というCloudflare D1ネイティブAPIの
  * インターフェースだけを最小限に再現する。
  */
-function makeFakeD1Binding({ rankingRows = [], shouldThrow = false } = {}) {
+function makeFakeD1Binding({
+  rankingRows = [],
+  evaluationRow = null,
+  priceRows = [],
+  shouldThrow = false,
+  shouldThrowAll = false,
+  shouldThrowFirst = false,
+} = {}) {
   return {
     prepare(sql) {
       const statement = {
@@ -1228,13 +1235,20 @@ function makeFakeD1Binding({ rankingRows = [], shouldThrow = false } = {}) {
           return statement;
         },
         async all() {
-          if (shouldThrow) throw new Error("D1 query failed (test)");
+          if (shouldThrow || shouldThrowAll) throw new Error("D1 query failed (test)");
+          if (sql.includes("FROM stock_prices")) {
+            return { results: priceRows };
+          }
           if (sql.includes("FROM ai_evaluations")) {
             return { results: rankingRows };
           }
           return { results: [] };
         },
         async first() {
+          if (shouldThrow || shouldThrowFirst) throw new Error("D1 query failed (test)");
+          if (sql.includes("FROM ai_evaluations")) {
+            return evaluationRow;
+          }
           return null;
         },
         async run() {
@@ -1370,6 +1384,160 @@ await test("/api/ranking: 他の既存エンドポイント(/api/meta)は引き�
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.cutoffDate, "2026-09-19");
+});
+
+console.log("[test] worker/src/index.js (/api/stocks/:code, /api/stocks/:code/prices)");
+
+function makeFakeKv(store) {
+  return {
+    async get(key) {
+      return Object.prototype.hasOwnProperty.call(store, key) ? JSON.stringify(store[key]) : null;
+    },
+  };
+}
+
+await test("/api/stocks/:code: KVの基本情報とD1の最新AI評価をまとめて返す", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const kv = makeFakeKv({
+    stocks: [{ code: "7203", name: "トヨタ自動車", market: "プライム", price: 2800, dataAsOf: "2026-09-19" }],
+  });
+  const db = makeFakeD1Binding({
+    evaluationRow: {
+      code: "7203", stock_name: "トヨタ自動車", score: 90, rating: "BUY", risk: "MEDIUM",
+      expected_return: 3.2, expected_holding_days: 5, upside_probability: 65, downside_risk: 30,
+      confidence: 70, reasoning: "r", summary: "s", positive_factors: '["a"]', negative_factors: "[]",
+      evaluation_date: "2026-09-20", data_as_of_date: "2026-09-19", generated_at: "2026-09-20T06:00:00Z",
+      price_at_evaluation: 2800,
+    },
+  });
+  const res = await worker.fetch(new Request("https://example.com/api/stocks/7203"), { STOCK_KV: kv, DB: db });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.code, "7203");
+  assert.equal(body.name, "トヨタ自動車");
+  assert.equal(body.market, "プライム");
+  assert.equal(body.price, 2800);
+  assert.ok(body.latestEvaluation);
+  assert.equal(body.latestEvaluation.rating, "BUY");
+  assert.equal(body.latestEvaluation.risk, "MEDIUM");
+  assert.equal(body.latestEvaluation.expectedHoldingDays, 5);
+  assert.deepEqual(body.latestEvaluation.positiveFactors, ["a"]);
+});
+
+await test("/api/stocks/:code: Gemini未分析の銘柄はlatestEvaluation:nullで200を返す", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const kv = makeFakeKv({
+    stocks: [{ code: "9999", name: "テスト銘柄", market: "スタンダード", price: 100, dataAsOf: "2026-09-19" }],
+  });
+  const res = await worker.fetch(new Request("https://example.com/api/stocks/9999"), {
+    STOCK_KV: kv,
+    DB: makeFakeD1Binding({ evaluationRow: null }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).latestEvaluation, null);
+});
+
+await test("/api/stocks/:code: 存在しない銘柄コードは404", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const res = await worker.fetch(new Request("https://example.com/api/stocks/0000"), {
+    STOCK_KV: makeFakeKv({ stocks: [] }),
+    DB: makeFakeD1Binding(),
+  });
+  assert.equal(res.status, 404);
+});
+
+await test("/api/stocks/:code: D1クエリ失敗時も基本情報は200・latestEvaluationはnull", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const kv = makeFakeKv({
+    stocks: [{ code: "7203", name: "トヨタ自動車", market: "プライム", price: 2800, dataAsOf: "2026-09-19" }],
+  });
+  const res = await worker.fetch(new Request("https://example.com/api/stocks/7203"), {
+    STOCK_KV: kv,
+    DB: makeFakeD1Binding({ shouldThrowFirst: true }),
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.code, "7203");
+  assert.equal(body.latestEvaluation, null);
+});
+
+await test("/api/stocks/:code: env.DB未接続でも基本情報は200で返す", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const kv = makeFakeKv({
+    stocks: [{ code: "7203", name: "トヨタ自動車", market: "プライム", price: 2800, dataAsOf: "2026-09-19" }],
+  });
+  const res = await worker.fetch(new Request("https://example.com/api/stocks/7203"), { STOCK_KV: kv });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).latestEvaluation, null);
+});
+
+await test("/api/stocks/:code/prices: D1のstock_pricesを日付昇順で返す", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const db = makeFakeD1Binding({
+    priceRows: [
+      { date: "2026-09-18", open: null, high: 2820, low: 2780, close: 2800, volume: 1000000 },
+      { date: "2026-09-19", open: null, high: 2850, low: 2790, close: 2830, volume: 1200000 },
+    ],
+  });
+  const res = await worker.fetch(new Request("https://example.com/api/stocks/7203/prices"), {
+    DB: db,
+    STOCK_KV: makeFakeKv({}),
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.length, 2);
+  assert.equal(body[0].date, "2026-09-18");
+  assert.equal(body[1].close, 2830);
+});
+
+await test("/api/stocks/:code/prices: D1に無ければKVのprices:{code}にフォールバックする", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const kv = makeFakeKv({ "prices:9999": [{ date: "2026-09-19", close: 100, volume: 500 }] });
+  const res = await worker.fetch(new Request("https://example.com/api/stocks/9999/prices"), {
+    DB: makeFakeD1Binding({ priceRows: [] }),
+    STOCK_KV: kv,
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.length, 1);
+  assert.equal(body[0].close, 100);
+});
+
+await test("/api/stocks/:code/prices: D1クエリ失敗時もKVへフォールバックする", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const kv = makeFakeKv({ "prices:7203": [{ date: "2026-09-19", close: 2800, volume: 100 }] });
+  const res = await worker.fetch(new Request("https://example.com/api/stocks/7203/prices"), {
+    DB: makeFakeD1Binding({ shouldThrowAll: true }),
+    STOCK_KV: kv,
+  });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).length, 1);
+});
+
+await test("/api/stocks/:code/prices: env.DB未接続でもKVから返す（既存の振る舞いを維持）", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const kv = makeFakeKv({ "prices:7203": [{ date: "2026-09-19", close: 2800, volume: 100 }] });
+  const res = await worker.fetch(new Request("https://example.com/api/stocks/7203/prices"), { STOCK_KV: kv });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).length, 1);
+});
+
+await test("/api/stocks/:code/prices: D1・KVともデータが無ければ空配列", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const res = await worker.fetch(new Request("https://example.com/api/stocks/0000/prices"), {
+    DB: makeFakeD1Binding({ priceRows: [] }),
+    STOCK_KV: makeFakeKv({}),
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), []);
+});
+
+await test("/api/stocks/:code/analysis: 引き続きKVベースのまま動作する（回帰確認）", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const kv = makeFakeKv({ "analysis:7203": { code: "7203", rating: "BUY" } });
+  const res = await worker.fetch(new Request("https://example.com/api/stocks/7203/analysis"), { STOCK_KV: kv });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).rating, "BUY");
 });
 
 console.log(`\n[test] ${passed}件成功`);
