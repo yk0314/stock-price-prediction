@@ -293,6 +293,15 @@ async function main() {
   const pricesByCodeForD1 = new Map(Object.entries(pricesByCode));
   const stocksForD1 = stocks.filter((s) => poolCodes.has(s.code));
 
+  // ▼▼▼ 一時デバッグ（原因特定用。確認後に削除すること） ▼▼▼
+  const firstPoolCode = pool[0]?.code;
+  console.log(`[DEBUG] poolCodes.has("1301") = ${poolCodes.has("1301")}`);
+  console.log(`[DEBUG] stocksForD1.length = ${stocksForD1.length}`);
+  console.log(`[DEBUG] stocksForD1のnameありcount = ${stocksForD1.filter((s) => s.name !== null).length}`);
+  console.log(`[DEBUG] stocksForD1先頭3件 =`, stocksForD1.slice(0, 3));
+  console.log(`[DEBUG] プール1番目のcode(${firstPoolCode})のstocksForD1内エントリ =`, stocksForD1.find((s) => s.code === firstPoolCode));
+  // ▲▲▲ 一時デバッグここまで ▲▲▲
+
   const d1Summary = await saveToD1(meta, {
     stocks: stocksForD1,
     pricesByCode: pricesByCodeForD1,

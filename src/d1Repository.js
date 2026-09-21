@@ -73,6 +73,10 @@ export async function saveStocksToD1(d1, stocks) {
   const updatedAt = new Date().toISOString();
   const columns = ["code", "name", "market", "updated_at"];
   const rows = stocks.map((s) => [s.code, s.name ?? null, s.market ?? null, updatedAt]);
+  // ▼▼▼ 一時デバッグ（原因特定用。確認後に削除すること） ▼▼▼
+  console.log(`[DEBUG-D1Repo] saveStocksToD1: columns =`, columns);
+  console.log(`[DEBUG-D1Repo] saveStocksToD1: rows先頭3件 =`, rows.slice(0, 3));
+  // ▲▲▲ 一時デバッグここまで ▲▲▲
   return d1.batchInsertOrReplace("stocks", columns, rows);
 }
 
