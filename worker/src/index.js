@@ -462,7 +462,17 @@ export default {
       const path = url.pathname;
 
       if (request.method === "OPTIONS") {
-        return jsonResponse({}, 204);
+        // 204 No Content はレスポンス本文を持てないため、jsonResponse({}, 204) は使わない
+        // （本文ありのまま204を返そうとするとレスポンス構築時に例外になり、結果としてPOST系
+        //  エンドポイントへのCORSプリフライトが軒並み失敗する原因になっていた）。
+        return new Response(null, {
+          status: 204,
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+          },
+        });
       }
 
       // GET /api/meta — 最終実行日時・cutoffDate等
