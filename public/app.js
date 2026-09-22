@@ -270,20 +270,163 @@ async function loadDetail(code) {
   }
 }
 
+// ---- 保有銘柄画面 ----
+
+function renderHoldingCard(h) {
+  const pnlClass = percentClass(h.unrealizedPnl);
+  return `
+    <a class="rank-card" href="#/stock/${encodeURIComponent(h.code)}">
+      <div class="rank-card-top">
+        <div class="rank-card-title">
+          <span class="stock-code">${h.code}</span>
+          <span class="stock-name">${h.name ?? "銘柄名未取得"}</span>
+        </div>
+        ${h.latestEvaluation ? ratingBadge(h.latestEvaluation.rating) : ""}
+      </div>
+      <div class="rank-card-metrics">
+        <div class="metric">
+          <span class="metric-label">保有数量</span>
+          <span class="metric-value">${h.quantity.toLocaleString()}株</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">平均取得単価</span>
+          <span class="metric-value">¥${Math.round(h.avgCost).toLocaleString()}</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">現在価格</span>
+          <span class="metric-value">${h.currentPrice ? `¥${Number(h.currentPrice).toLocaleString()}` : "-"}</span>
+        </div>
+      </div>
+      <div class="pnl-line ${pnlClass}">
+        評価損益: ${h.unrealizedPnl !== null ? `${h.unrealizedPnl > 0 ? "+" : ""}¥${Math.round(h.unrealizedPnl).toLocaleString()}` : "-"}
+        （${formatPercent(h.unrealizedPnlPct !== null ? Math.round(h.unrealizedPnlPct * 10) / 10 : null)}）
+      </div>
+    </a>
+  `;
+}
+
+async function loadHoldings() {
+  const el = document.getElementById("holdings-list");
+  el.textContent = "読み込み中...";
+  try {
+    const holdings = await fetchJson("/api/holdings");
+    el.innerHTML = holdings.length
+      ? `<div class="ranking-grid">${holdings.map(renderHoldingCard).join("")}</div>`
+      : `<p class="no-data">現在保有中の銘柄はありません。</p>`;
+  } catch {
+    el.innerHTML = `<p class="no-data">保有銘柄を取得できませんでした。</p>`;
+  }
+}
+
+// ---- 売買履歴画面 ----
+
+function renderTradeRow(t) {
+  const typeLabel = t.transactionType === "buy" ? "買い" : "売り";
+  const typeClass = t.transactionType === "buy" ? "trade-type-buy" : "trade-type-sell";
+  const pnlLabel = t.pnlType === "realized" ? "実現損益" : "含み損益（参考）";
+  const pnlText =
+    t.pnl !== null
+      ? `${t.pnl > 0 ? "+" : ""}¥${Math.round(t.pnl).toLocaleString()}（${formatPercent(
+          t.pnlPct !== null ? Math.round(t.pnlPct * 10) / 10 : null
+        )}）`
+      : "-";
+  const winLabel = t.win === null ? "" : t.win ? `<span class="badge badge-buy">勝ち</span>` : `<span class="badge badge-sell">負け</span>`;
+
+  return `
+    <tr>
+      <td>${t.transactionDate}</td>
+      <td><a href="#/stock/${encodeURIComponent(t.code)}">${t.code} ${t.name ?? ""}</a></td>
+      <td><span class="trade-type ${typeClass}">${typeLabel}</span></td>
+      <td>${t.quantity.toLocaleString()}株</td>
+      <td>¥${Number(t.price).toLocaleString()}</td>
+      <td class="${percentClass(t.pnl)}">${pnlLabel}<br />${pnlText} ${winLabel}</td>
+      <td class="meta-line">${t.memo ?? ""}</td>
+    </tr>
+  `;
+}
+
+async function loadTrades() {
+  const el = document.getElementById("trades-list");
+  el.textContent = "読み込み中...";
+  try {
+    const trades = await fetchJson("/api/trades");
+    el.innerHTML = trades.length
+      ? `
+        <table class="trades-table">
+          <thead>
+            <tr><th>日付</th><th>銘柄</th><th>区分</th><th>数量</th><th>約定価格</th><th>損益</th><th>メモ</th></tr>
+          </thead>
+          <tbody>${trades.map(renderTradeRow).join("")}</tbody>
+        </table>
+      `
+      : `<p class="no-data">売買履歴はまだありません。</p>`;
+  } catch {
+    el.innerHTML = `<p class="no-data">売買履歴を取得できませんでした。</p>`;
+  }
+}
+
+async function submitTradeForm(e) {
+  e.preventDefault();
+  const messageEl = document.getElementById("trade-form-message");
+  const submitButton = document.getElementById("trade-submit");
+  messageEl.textContent = "";
+  messageEl.className = "form-message";
+
+  const code = document.getElementById("trade-code").value.trim();
+  const transactionType = document.getElementById("trade-type").value;
+  const quantity = Number(document.getElementById("trade-quantity").value);
+  const price = Number(document.getElementById("trade-price").value);
+  const transactionDate = document.getElementById("trade-date").value;
+  const memo = document.getElementById("trade-memo").value.trim();
+
+  submitButton.disabled = true;
+  try {
+    const res = await fetch(API_BASE + "/api/trades", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, transactionType, quantity, price, transactionDate, memo: memo || null }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      messageEl.textContent = body.error ?? "登録に失敗しました。";
+      messageEl.classList.add("form-message-error");
+      return;
+    }
+    messageEl.textContent = "登録しました。";
+    messageEl.classList.add("form-message-success");
+    document.getElementById("trade-form").reset();
+    loadTrades();
+    loadHoldings();
+  } catch {
+    messageEl.textContent = "通信エラーが発生しました。";
+    messageEl.classList.add("form-message-error");
+  } finally {
+    submitButton.disabled = false;
+  }
+}
+
 // ---- 画面切り替え（ハッシュルーティング） ----
 
 function showView(name) {
   document.getElementById("view-ranking").hidden = name !== "ranking";
   document.getElementById("view-detail").hidden = name !== "detail";
+  document.getElementById("view-holdings").hidden = name !== "holdings";
+  document.getElementById("view-trades").hidden = name !== "trades";
 }
 
 function handleRoute() {
-  const hash = window.location.hash; // 例: "#/stock/7203" または "" / "#/"
+  const hash = window.location.hash; // 例: "#/stock/7203", "#/holdings", "#/trades", "" / "#/"
   const stockMatch = hash.match(/^#\/stock\/([^/]+)$/);
   if (stockMatch) {
     const code = decodeURIComponent(stockMatch[1]);
     showView("detail");
     loadDetail(code);
+  } else if (hash === "#/holdings") {
+    showView("holdings");
+    loadHoldings();
+  } else if (hash === "#/trades") {
+    showView("trades");
+    loadTrades();
   } else {
     showView("ranking");
   }
@@ -297,6 +440,9 @@ document.getElementById("ranking-reload").addEventListener("click", () => {
   loadMeta();
   loadRanking();
 });
+document.getElementById("holdings-reload").addEventListener("click", loadHoldings);
+document.getElementById("trades-reload").addEventListener("click", loadTrades);
+document.getElementById("trade-form").addEventListener("submit", submitTradeForm);
 
 handleRoute();
 loadMeta();

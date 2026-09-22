@@ -409,3 +409,141 @@ footer {
 .eval-reasoning p {
   margin: 8px 0 0;
 }
+
+/* ---- ナビゲーション ---- */
+
+.main-nav {
+  display: flex;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.nav-link {
+  font-size: 0.85em;
+  padding: 6px 12px;
+  border-radius: 6px;
+  text-decoration: none;
+  color: var(--color-text);
+  background: #eef0f3;
+}
+
+.nav-link:hover {
+  background: #e2e4e8;
+}
+
+/* ---- 保有銘柄: 評価損益ライン ---- */
+
+.pnl-line {
+  font-size: 0.9em;
+  font-weight: bold;
+  padding-top: 6px;
+}
+
+/* ---- 売買登録フォーム ---- */
+
+.trade-form {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 28px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px 16px;
+  align-items: end;
+}
+
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-row label {
+  font-size: 0.78em;
+  color: var(--color-text-muted);
+}
+
+.form-row input,
+.form-row select {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 7px 8px;
+  font-size: 0.95em;
+}
+
+.trade-form button[type="submit"] {
+  grid-column: 1 / -1;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  background: #1a1a1a;
+  color: #fff;
+  font-weight: bold;
+  cursor: pointer;
+  justify-self: start;
+  min-width: 140px;
+}
+
+.trade-form button[type="submit"]:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.form-message {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.85em;
+}
+
+.form-message-success { color: var(--color-buy); }
+.form-message-error { color: var(--color-sell); }
+
+/* ---- 売買履歴テーブル ---- */
+
+.trades-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  font-size: 0.88em;
+}
+
+.trades-table th,
+.trades-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.trades-table th {
+  background: #f0f1f3;
+  font-size: 0.85em;
+  color: var(--color-text-muted);
+}
+
+.trades-table tr:last-child td {
+  border-bottom: none;
+}
+
+.trade-type {
+  display: inline-block;
+  font-size: 0.85em;
+  font-weight: bold;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.trade-type-buy { color: var(--color-buy); background: var(--color-buy-bg); }
+.trade-type-sell { color: var(--color-sell); background: var(--color-sell-bg); }
+
+@media (max-width: 700px) {
+  .trades-table {
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+}

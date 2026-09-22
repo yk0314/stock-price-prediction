@@ -9,11 +9,17 @@
 <body>
   <header>
     <h1>日本株AI短期売買分析ツール</h1>
+    <nav class="main-nav">
+      <a href="#/" class="nav-link">ランキング</a>
+      <a href="#/holdings" class="nav-link">保有銘柄</a>
+      <a href="#/trades" class="nav-link">売買履歴</a>
+    </nav>
     <p id="meta-info" class="meta-info">読み込み中...</p>
     <p class="disclaimer">
       本サイトの評価はAIによる参考情報です。表示されるスコア・期待リターン・リスクは
       統計的に校正された確率ではなく、AIによる定性的な評価値です。このツールは自動で売買を行うものではありません。
       投資判断はご自身の責任で行ってください。投資利益を保証するものではありません。
+      売買はSBI証券等で実際に行った内容を、このツールに手動で記録するものです。
     </p>
   </header>
 
@@ -27,10 +33,63 @@
       <div id="ranking-list" class="ranking-grid" aria-live="polite">読み込み中...</div>
     </section>
 
-    <!-- 銘柄詳細画面（次のステップで中身を実装） -->
+    <!-- 銘柄詳細画面 -->
     <section id="view-detail" class="view" hidden>
       <button id="back-to-ranking" class="back-button">← ランキングに戻る</button>
       <div id="detail-content" aria-live="polite">読み込み中...</div>
+    </section>
+
+    <!-- 保有銘柄画面 -->
+    <section id="view-holdings" class="view" hidden>
+      <div class="section-head">
+        <h2>保有銘柄</h2>
+        <button id="holdings-reload" class="reload-button" title="再読み込み">更新</button>
+      </div>
+      <div id="holdings-list" aria-live="polite">読み込み中...</div>
+    </section>
+
+    <!-- 売買履歴画面（BUY/SELL登録フォーム込み） -->
+    <section id="view-trades" class="view" hidden>
+      <div class="section-head">
+        <h2>売買記録を登録</h2>
+      </div>
+      <form id="trade-form" class="trade-form">
+        <div class="form-row">
+          <label for="trade-code">銘柄コード</label>
+          <input type="text" id="trade-code" required placeholder="例: 7203" />
+        </div>
+        <div class="form-row">
+          <label for="trade-type">区分</label>
+          <select id="trade-type">
+            <option value="buy">買い (BUY)</option>
+            <option value="sell">売り (SELL)</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label for="trade-quantity">数量</label>
+          <input type="number" id="trade-quantity" required min="1" step="1" />
+        </div>
+        <div class="form-row">
+          <label for="trade-price">約定価格（円）</label>
+          <input type="number" id="trade-price" required min="0" step="0.1" />
+        </div>
+        <div class="form-row">
+          <label for="trade-date">約定日</label>
+          <input type="date" id="trade-date" required />
+        </div>
+        <div class="form-row">
+          <label for="trade-memo">メモ（任意）</label>
+          <input type="text" id="trade-memo" placeholder="例: 決算通過を確認して購入" />
+        </div>
+        <button type="submit" id="trade-submit">登録する</button>
+        <p id="trade-form-message" class="form-message" role="alert"></p>
+      </form>
+
+      <div class="section-head">
+        <h2>売買履歴</h2>
+        <button id="trades-reload" class="reload-button" title="再読み込み">更新</button>
+      </div>
+      <div id="trades-list" aria-live="polite">読み込み中...</div>
     </section>
   </main>
 

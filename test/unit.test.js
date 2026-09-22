@@ -1540,6 +1540,176 @@ await test("/api/stocks/:code/analysis: 引き続きKVベースのまま動作�
   assert.equal((await res.json()).rating, "BUY");
 });
 
+console.log("[test] worker/src/index.js (/api/trades, /api/holdings)");
+
+/**
+ * trades配列を保持するインメモリD1モック。POST/GET(trades)・holdings計算用の最小限のみ再現する。
+ */
+function makeFakeTradesD1({ trades = [], latestEvaluationIdByCode = {}, latestEvaluationRowByCode = {} } = {}) {
+  const state = { trades: [...trades], nextId: (Math.max(0, ...trades.map((t) => t.id)) || 0) + 1 };
+  return {
+    prepare(sql) {
+      const statement = {
+        sql,
+        args: [],
+        bind(...args) {
+          statement.args = args;
+          return statement;
+        },
+        async first() {
+          if (sql.includes("SELECT id FROM ai_evaluations")) {
+            const id = latestEvaluationIdByCode[statement.args[0]];
+            return id ? { id } : null;
+          }
+          if (sql.includes("FROM ai_evaluations")) {
+            return latestEvaluationRowByCode[statement.args[0]] ?? null;
+          }
+          return null;
+        },
+        async all() {
+          if (sql.includes("FROM trades")) {
+            const codeFilter = sql.includes("WHERE t.code = ?") ? statement.args[0] : null;
+            const rows = state.trades
+              .filter((t) => !codeFilter || t.code === codeFilter)
+              .sort((a, b) => (a.transaction_date < b.transaction_date ? -1 : a.transaction_date > b.transaction_date ? 1 : a.id - b.id));
+            return { results: rows };
+          }
+          return { results: [] };
+        },
+        async run() {
+          if (sql.includes("INSERT INTO trades")) {
+            const [code, transaction_type, transaction_date, quantity, price, amount, memo, purchase_evaluation_id, created_at] = statement.args;
+            const row = { id: state.nextId++, code, transaction_type, transaction_date, quantity, price, amount, memo, purchase_evaluation_id, created_at, stock_name: null };
+            state.trades.push(row);
+            return { meta: { last_row_id: row.id } };
+          }
+          return { meta: { last_row_id: 1 } };
+        },
+      };
+      return statement;
+    },
+  };
+}
+
+await test("POST /api/trades: buy登録で最新AI評価が自動で紐付く", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const db = makeFakeTradesD1({ latestEvaluationIdByCode: { "7203": 42 } });
+  const req = new Request("https://example.com/api/trades", {
+    method: "POST",
+    body: JSON.stringify({ code: "7203", transactionType: "buy", quantity: 100, price: 2800, transactionDate: "2026-09-01" }),
+  });
+  const res = await worker.fetch(req, { DB: db, STOCK_KV: makeFakeKv({}) });
+  assert.equal(res.status, 201);
+  const body = await res.json();
+  assert.equal(body.purchaseEvaluationId, 42);
+  assert.equal(body.amount, 280000);
+});
+
+await test("POST /api/trades: 保有数量を超えるsellは400", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const db = makeFakeTradesD1({
+    trades: [{ id: 1, code: "7203", transaction_type: "buy", transaction_date: "2026-09-01", quantity: 100, price: 2800, amount: 280000, memo: null, purchase_evaluation_id: null, created_at: "t" }],
+  });
+  const req = new Request("https://example.com/api/trades", {
+    method: "POST",
+    body: JSON.stringify({ code: "7203", transactionType: "sell", quantity: 200, price: 2900, transactionDate: "2026-09-10" }),
+  });
+  const res = await worker.fetch(req, { DB: db, STOCK_KV: makeFakeKv({}) });
+  assert.equal(res.status, 400);
+});
+
+await test("POST /api/trades: 不正な入力(quantity<=0, 不正なtransactionType)は400", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const db = makeFakeTradesD1({});
+  const req1 = new Request("https://example.com/api/trades", {
+    method: "POST",
+    body: JSON.stringify({ code: "7203", transactionType: "buy", quantity: 0, price: 2800, transactionDate: "2026-09-01" }),
+  });
+  assert.equal((await worker.fetch(req1, { DB: db, STOCK_KV: makeFakeKv({}) })).status, 400);
+
+  const req2 = new Request("https://example.com/api/trades", {
+    method: "POST",
+    body: JSON.stringify({ code: "7203", transactionType: "hoge", quantity: 10, price: 100, transactionDate: "2026-09-01" }),
+  });
+  assert.equal((await worker.fetch(req2, { DB: db, STOCK_KV: makeFakeKv({}) })).status, 400);
+});
+
+await test("GET /api/trades: 移動平均法で実現損益・含み損益が正しく計算される", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  // 100株@2000円 → 100株@2400円(平均2200円) → 50株を2500円で売却 → 実現損益=(2500-2200)*50=15000
+  const db = makeFakeTradesD1({
+    trades: [
+      { id: 1, code: "7203", transaction_type: "buy", transaction_date: "2026-08-01", quantity: 100, price: 2000, amount: 200000, memo: null, purchase_evaluation_id: 10, created_at: "t1" },
+      { id: 2, code: "7203", transaction_type: "buy", transaction_date: "2026-08-15", quantity: 100, price: 2400, amount: 240000, memo: null, purchase_evaluation_id: 11, created_at: "t2" },
+      { id: 3, code: "7203", transaction_type: "sell", transaction_date: "2026-09-01", quantity: 50, price: 2500, amount: 125000, memo: null, purchase_evaluation_id: null, created_at: "t3" },
+    ],
+  });
+  const kv = makeFakeKv({ stocks: [{ code: "7203", name: "トヨタ自動車", price: 2800 }] });
+  const res = await worker.fetch(new Request("https://example.com/api/trades"), { DB: db, STOCK_KV: kv });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  const sellRow = body.find((t) => t.id === 3);
+  assert.equal(sellRow.pnlType, "realized");
+  assert.equal(sellRow.pnl, 15000);
+  assert.equal(sellRow.win, true);
+  const buyRow1 = body.find((t) => t.id === 1);
+  assert.equal(buyRow1.pnl, (2800 - 2000) * 100);
+});
+
+await test("GET /api/trades: env.DB未接続時は空配列（回帰確認）", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const res = await worker.fetch(new Request("https://example.com/api/trades"), {});
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), []);
+});
+
+await test("GET /api/holdings: 保有数量0(全部売却済み)の銘柄は含まれない", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const db = makeFakeTradesD1({
+    trades: [
+      { id: 1, code: "7203", transaction_type: "buy", transaction_date: "2026-08-01", quantity: 100, price: 2000, amount: 200000, memo: null, purchase_evaluation_id: null, created_at: "t1" },
+      { id: 2, code: "7203", transaction_type: "sell", transaction_date: "2026-09-01", quantity: 100, price: 2500, amount: 250000, memo: null, purchase_evaluation_id: null, created_at: "t2" },
+    ],
+  });
+  const res = await worker.fetch(new Request("https://example.com/api/holdings"), { DB: db, STOCK_KV: makeFakeKv({ stocks: [] }) });
+  assert.deepEqual(await res.json(), []);
+});
+
+await test("GET /api/holdings: 平均取得価格・評価損益・最新AI評価が正しく含まれる", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const db = makeFakeTradesD1({
+    trades: [
+      { id: 1, code: "7203", transaction_type: "buy", transaction_date: "2026-08-01", quantity: 100, price: 2000, amount: 200000, memo: null, purchase_evaluation_id: null, created_at: "t1" },
+      { id: 2, code: "7203", transaction_type: "buy", transaction_date: "2026-08-15", quantity: 100, price: 2400, amount: 240000, memo: null, purchase_evaluation_id: null, created_at: "t2" },
+    ],
+    latestEvaluationRowByCode: {
+      "7203": {
+        code: "7203", stock_name: "トヨタ自動車", score: 88, rating: "BUY", risk: "LOW",
+        expected_return: 2.5, expected_holding_days: 4, upside_probability: 60, downside_risk: 20,
+        confidence: 75, reasoning: "r", summary: "s", positive_factors: "[]", negative_factors: "[]",
+        evaluation_date: "2026-09-20", data_as_of_date: "2026-09-19", generated_at: "2026-09-20T06:00:00Z",
+        price_at_evaluation: 2100,
+      },
+    },
+  });
+  const kv = makeFakeKv({ stocks: [{ code: "7203", name: "トヨタ自動車", price: 2800 }] });
+  const res = await worker.fetch(new Request("https://example.com/api/holdings"), { DB: db, STOCK_KV: kv });
+  const body = await res.json();
+  assert.equal(body.length, 1);
+  assert.equal(body[0].quantity, 200);
+  assert.equal(body[0].avgCost, 2200);
+  assert.equal(body[0].unrealizedPnl, (2800 - 2200) * 200);
+  assert.ok(body[0].latestEvaluation);
+  assert.equal(body[0].latestEvaluation.rating, "BUY");
+});
+
+await test("/api/ranking は引き続き正常動作する（trades追加後の回帰確認）", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const db = { prepare: () => ({ bind: function () { return this; }, all: async () => ({ results: [] }) }) };
+  const res = await worker.fetch(new Request("https://example.com/api/ranking"), { DB: db });
+  assert.equal(res.status, 200);
+});
+
 console.log(`\n[test] ${passed}件成功`);
 if (process.exitCode) {
   console.error("[test] 失敗したテストがあります");
