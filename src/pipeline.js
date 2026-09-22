@@ -11,6 +11,8 @@ import { writeArtifact } from "./artifacts.js";
 import { fetchTopixForRange, computeMarketFeatures, computeRelativeStrength } from "./market.js";
 import { buildAvailableFinancialsByCode } from "./financials.js";
 import { buildListedInfoByCode } from "./listedInfo.js";
+import { D1Client } from "./d1.js";
+import { fetchHeldCodes } from "./d1Repository.js";
 
 function addDaysUTC(dateStr, days) {
   const d = new Date(dateStr + "T00:00:00Z");
@@ -44,6 +46,35 @@ function applyUniverseFilter(groupedByCode, universeMode) {
   return filtered;
 }
 
+/**
+ * 保有銘柄(heldCodes)のうち、通常のGemini候補(normalCandidateCodes)に既に含まれていない銘柄を
+ * 「保有銘柄の再評価対象」として選び出す純粋関数。
+ * - 通常候補と重複する銘柄はGeminiへの重複送信を避けるため除外する(duplicateCountとして数える)
+ * - 当日の特徴量が無い(featureByCodeに存在しない)銘柄は評価不能なのでスキップする(missingFeatureCodes)
+ * - heldCodesが空配列なら、当然heldExtraCandidatesも空配列になる(保有銘柄0件時の正常系)
+ * pipeline.js本体から切り出しているのは、D1アクセスを伴わない部分だけを単体テスト可能にするため。
+ */
+export function selectHeldExtraCandidates(heldCodes, normalCandidateCodes, featureByCode) {
+  const heldExtraCandidates = [];
+  const missingFeatureCodes = [];
+  let duplicateCount = 0;
+
+  for (const code of heldCodes) {
+    if (normalCandidateCodes.has(code)) {
+      duplicateCount++;
+      continue;
+    }
+    const feature = featureByCode.get(code);
+    if (!feature) {
+      missingFeatureCodes.push(code);
+      continue;
+    }
+    heldExtraCandidates.push(feature);
+  }
+
+  return { heldExtraCandidates, missingFeatureCodes, duplicateCount };
+}
+
 async function main() {
   const startedAt = new Date();
   const predictionExecutedAt = startedAt.toISOString();
@@ -51,7 +82,7 @@ async function main() {
   console.log(`[pipeline] 開始: ${predictionExecutedAt} (UNIVERSE_MODE=${universeMode})`);
 
   // API呼び出し中に発生したエラー件数を種類別に集計する（検証項目「APIエラー数」用）。
-  const apiErrorCounts = { jquantsFinancials: 0, topix: 0, gemini429OrError: 0, listedInfo: 0 };
+  const apiErrorCounts = { jquantsFinancials: 0, topix: 0, gemini429OrError: 0, listedInfo: 0, heldCodesFetch: 0 };
 
   // --- Stage 0: cutoffDate の決定（手動指定 or 自動計算） ---
   const manualCutoff = process.env.CUTOFF_DATE || undefined;
@@ -154,14 +185,53 @@ async function main() {
   );
   await writeArtifact("screened.json", { pool, geminiCandidates });
 
-  // --- Stage 4.5: 財務データ — Gemini対象銘柄にのみ、銘柄コード指定で取得 ---
+  // --- Stage 4.6: 保有銘柄の再評価対象追加 ---
+  // 通常のスクリーニング結果に関わらず、現在保有中(数量>0)の銘柄は必ず当日のGemini評価対象に含める。
+  // 「たまたまスクリーニング上位に入った日だけ評価される」現状を、
+  // 「保有している限り毎日評価される」状態にするための追加ロジック。
+  // 既にgeminiCandidatesに含まれている銘柄(通常候補と保有銘柄が重複するケース)は
+  // 二重にGeminiへ送らないよう除外する（Geminiへのリクエスト数を必要以上に増やさないため）。
+  // 保有銘柄が0件、またはD1未接続・取得失敗時は、再評価処理自体をスキップして通常通り続行する
+  // （他のAPI取得失敗時と同じ「補助的な処理は失敗してもパイプライン全体を止めない」方針を踏襲）。
+  const normalCandidateCodes = new Set(geminiCandidates.map((c) => c.code));
+  const featureByCode = new Map(featureList.map((f) => [f.code, f]));
+  let heldExtraCandidates = [];
+  if (process.env.CF_D1_DATABASE_ID) {
+    try {
+      const heldD1 = new D1Client({
+        accountId: process.env.CF_ACCOUNT_ID,
+        databaseId: process.env.CF_D1_DATABASE_ID,
+        apiToken: process.env.CF_API_TOKEN,
+      });
+      const heldCodes = await fetchHeldCodes(heldD1);
+      const selection = selectHeldExtraCandidates(heldCodes, normalCandidateCodes, featureByCode);
+      heldExtraCandidates = selection.heldExtraCandidates;
+      console.log(
+        `[pipeline] 保有銘柄の再評価対象: 保有${heldCodes.length}銘柄中、通常候補と重複${selection.duplicateCount}件を除き、追加${heldExtraCandidates.length}件をGemini対象に追加` +
+          (selection.missingFeatureCodes.length > 0
+            ? `（特徴量計算不可のためスキップ: ${selection.missingFeatureCodes.join(", ")}）`
+            : "")
+      );
+    } catch (err) {
+      apiErrorCounts.heldCodesFetch++;
+      console.warn(`[pipeline] 保有銘柄の取得に失敗したため、保有銘柄の再評価はスキップして続行: ${err.message}`);
+    }
+  } else {
+    console.log("[pipeline] CF_D1_DATABASE_ID未設定のため、保有銘柄の再評価はスキップ");
+  }
+  const heldExtraCodes = new Set(heldExtraCandidates.map((c) => c.code));
+  // 財務データ取得・Gemini分析はこのcombinedCandidatesに対して行う。
+  // geminiCandidates自体（通常候補選定ロジック・件数）は一切変更していないことに注意。
+  const combinedCandidates = [...geminiCandidates, ...heldExtraCandidates];
+
+  // --- Stage 4.5: 財務データ — Gemini対象銘柄(通常候補+保有銘柄追加分)にのみ、銘柄コード指定で取得 ---
   // 全銘柄(数千件)やスクリーニングプール(百件超)に対して行うと非現実的なため、
   // 実際にGeminiへ渡す少数の候補にのみ取得する。これはUNIVERSE_MODEに関わらず同じロジック。
   // 開示日(discDate)がcutoffDateより厳密に前のものだけを採用し、未来情報の混入を防ぐ。
   const financialsByCode = new Map();
   if (config.FINANCIALS.enabled) {
     const rawFinancialsByCode = new Map();
-    for (const candidate of geminiCandidates) {
+    for (const candidate of combinedCandidates) {
       try {
         const rows = await jquants.fetchFinancialsForCode(candidate.code);
         rawFinancialsByCode.set(candidate.code, rows);
@@ -177,30 +247,35 @@ async function main() {
       financialsByCode.set(code, fin);
     }
     console.log(
-      `[pipeline] financials: Gemini対象${geminiCandidates.length}銘柄中 ${available.size}銘柄で利用可能な開示情報あり`
+      `[pipeline] financials: Gemini対象${combinedCandidates.length}銘柄中 ${available.size}銘柄で利用可能な開示情報あり`
     );
     await writeArtifact("financials.json", Object.fromEntries(available));
   } else {
     console.log("[pipeline] financials: config.FINANCIALS.enabled=falseのためスキップ");
   }
-  for (const candidate of geminiCandidates) {
+  for (const candidate of combinedCandidates) {
     candidate.financials = financialsByCode.get(candidate.code) ?? null;
   }
 
-  // --- Stage 5: gemini — AI分析（候補銘柄のみ。無料枠超過時は自動スキップ・リトライなし） ---
+  // --- Stage 5: gemini — AI分析（通常候補+保有銘柄追加分。無料枠超過時は自動スキップ・リトライなし） ---
   const analysisResults = await analyzeCandidates(
     process.env.GEMINI_API_KEY,
-    geminiCandidates,
+    combinedCandidates,
     { cutoffDate, predictionExecutedAt }
   );
-  apiErrorCounts.gemini429OrError = geminiCandidates.length - analysisResults.length;
+  apiErrorCounts.gemini429OrError = combinedCandidates.length - analysisResults.length;
   console.log(
-    `[pipeline] gemini: ${analysisResults.length}/${geminiCandidates.length}件で分析成功（失敗/スキップ=${apiErrorCounts.gemini429OrError}件）`
+    `[pipeline] gemini: ${analysisResults.length}/${combinedCandidates.length}件で分析成功（失敗/スキップ=${apiErrorCounts.gemini429OrError}件、うち保有銘柄追加分=${heldExtraCandidates.length}件）`
   );
   await writeArtifact("gemini-results.json", analysisResults);
 
   // --- Stage 6: ranking — 上位ランキングの作成 ---
-  const ranking = [...analysisResults]
+  // 公開ランキング(KVの"ranking")は、保有銘柄の追加によって挙動が変わらないよう、
+  // 従来通り通常候補(geminiCandidates)由来の結果のみを対象にする。
+  // 保有銘柄追加分の評価結果自体は、後段でanalysisByCode/D1のai_evaluationsには含める
+  // （/api/holdingsのlatestEvaluation等で使うため）。
+  const rankingSourceResults = analysisResults.filter((r) => normalCandidateCodes.has(r.code));
+  const ranking = [...rankingSourceResults]
     .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
     .slice(0, config.FINAL_RANKING_SIZE);
   await writeArtifact("ranking.json", ranking);
@@ -254,6 +329,7 @@ async function main() {
     excludedByScreeningCount: excludedCount,
     poolCount: pool.length,
     geminiCandidateCount: geminiCandidates.length,
+    heldExtraCandidateCount: heldExtraCandidates.length,
     analyzedCount: analysisResults.length,
     financialsFetchedCount: financialsByCode.size,
     listedInfoCount: listedInfoByCode.size,
@@ -288,6 +364,7 @@ async function main() {
     pricesByCode: pricesByCodeForD1,
     financialsByCode,
     analysisResults,
+    heldExtraCodes,
   });
 
   console.log(
@@ -296,7 +373,12 @@ async function main() {
   console.log(JSON.stringify({ ...meta, d1: d1Summary }, null, 2));
 }
 
-main().catch((err) => {
-  console.error(`[pipeline] 致命的エラー: ${err.stack || err.message}`);
-  process.exitCode = 1;
-});
+// このファイルが `node src/pipeline.js` として直接実行された場合のみmain()を起動する。
+// import.meta.url チェックにより、テストコードから selectHeldExtraCandidates 等を
+// import した際に誤ってパイプライン全体が起動してしまうことを防ぐ（実行時の挙動は変えない）。
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    console.error(`[pipeline] 致命的エラー: ${err.stack || err.message}`);
+    process.exitCode = 1;
+  });
+}

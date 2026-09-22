@@ -11,7 +11,7 @@ import {
  * 各テーブルの保存は独立してtry/catchし、1つが失敗しても他の保存は継続する。
  * @returns {Promise<object>} 保存件数と失敗内容のサマリー
  */
-export async function saveToD1(meta, { stocks, pricesByCode, financialsByCode, analysisResults }) {
+export async function saveToD1(meta, { stocks, pricesByCode, financialsByCode, analysisResults, heldExtraCodes }) {
   const summary = {
     enabled: false,
     stocks: 0,
@@ -100,7 +100,9 @@ export async function saveToD1(meta, { stocks, pricesByCode, financialsByCode, a
       positiveFactors: r.positiveFactors ?? [],
       negativeFactors: r.negativeFactors ?? [],
       usedFeatures: r.usedFeatures ?? {},
-      source: "pipeline",
+      // 保有銘柄の再評価で追加された銘柄(通常のスクリーニング候補ではない)は"holding"、
+      // それ以外(通常候補。保有中かどうかは問わない)は従来通り"pipeline"としてsourceで区別する。
+      source: heldExtraCodes?.has(r.code) ? "holding" : "pipeline",
       priceAtEvaluation: r.price ?? null,
     }));
 

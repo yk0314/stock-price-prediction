@@ -1710,6 +1710,143 @@ await test("/api/ranking は引き続き正常動作する（trades追加後の�
   assert.equal(res.status, 200);
 });
 
+console.log("[test] d1Repository.js (Phase3: 保有銘柄の日次再評価)");
+
+await test("fetchHeldCodes: 移動平均法で保有数量>0の銘柄コードのみ返す", async () => {
+  const { fetchHeldCodes } = await import("../src/d1Repository.js");
+  const rows = [
+    { id: 1, code: "7203", transaction_type: "buy", transaction_date: "2026-08-01", quantity: 100, price: 2000 },
+    { id: 2, code: "7203", transaction_type: "sell", transaction_date: "2026-09-01", quantity: 100, price: 2500 },
+    { id: 3, code: "6758", transaction_type: "buy", transaction_date: "2026-08-05", quantity: 50, price: 3000 },
+  ];
+  const held = await fetchHeldCodes({ async query() { return rows; } });
+  assert.deepEqual([...held].sort(), ["6758"]);
+});
+
+await test("fetchHeldCodes: 取引が無ければ空配列", async () => {
+  const { fetchHeldCodes } = await import("../src/d1Repository.js");
+  const held = await fetchHeldCodes({ async query() { return []; } });
+  assert.deepEqual(held, []);
+});
+
+console.log("[test] pipeline.js (Phase3: selectHeldExtraCandidates)");
+
+await test("保有銘柄は再評価対象になる", async () => {
+  const { selectHeldExtraCandidates } = await import("../src/pipeline.js");
+  const featureByCode = new Map([["1301", { code: "1301", price: 4000 }]]);
+  const { heldExtraCandidates } = selectHeldExtraCandidates(["1301"], new Set(), featureByCode);
+  assert.equal(heldExtraCandidates.length, 1);
+  assert.equal(heldExtraCandidates[0].code, "1301");
+});
+
+await test("保有していない銘柄は対象にならない(heldCodesに無ければ何も追加されない)", async () => {
+  const { selectHeldExtraCandidates } = await import("../src/pipeline.js");
+  const featureByCode = new Map([
+    ["1301", { code: "1301" }],
+    ["7203", { code: "7203" }],
+  ]);
+  // heldCodesには1301のみ渡す → featureByCodeに7203があっても対象にならない
+  const { heldExtraCandidates } = selectHeldExtraCandidates(["1301"], new Set(), featureByCode);
+  assert.deepEqual(heldExtraCandidates.map((c) => c.code), ["1301"]);
+});
+
+await test("通常候補と保有銘柄が重複してもGeminiへ重複追加しない", async () => {
+  const { selectHeldExtraCandidates } = await import("../src/pipeline.js");
+  const featureByCode = new Map([
+    ["7203", { code: "7203" }],
+    ["1301", { code: "1301" }],
+  ]);
+  // 7203は通常候補にも保有銘柄にも含まれる → heldExtraには追加されない(重複回避)
+  const { heldExtraCandidates, duplicateCount } = selectHeldExtraCandidates(
+    ["7203", "1301"],
+    new Set(["7203"]),
+    featureByCode
+  );
+  assert.deepEqual(heldExtraCandidates.map((c) => c.code), ["1301"]);
+  assert.equal(duplicateCount, 1);
+});
+
+await test("保有銘柄が0件でも正常終了する(空配列を返す)", async () => {
+  const { selectHeldExtraCandidates } = await import("../src/pipeline.js");
+  const result = selectHeldExtraCandidates([], new Set(["7203"]), new Map());
+  assert.deepEqual(result.heldExtraCandidates, []);
+  assert.deepEqual(result.missingFeatureCodes, []);
+  assert.equal(result.duplicateCount, 0);
+});
+
+await test("当日の特徴量が無い保有銘柄はスキップされる(missingFeatureCodesに計上)", async () => {
+  const { selectHeldExtraCandidates } = await import("../src/pipeline.js");
+  const { heldExtraCandidates, missingFeatureCodes } = selectHeldExtraCandidates(
+    ["0000"], // featureByCodeに存在しないコード
+    new Set(),
+    new Map()
+  );
+  assert.deepEqual(heldExtraCandidates, []);
+  assert.deepEqual(missingFeatureCodes, ["0000"]);
+});
+
+await test("saveToD1: heldExtraCodesに含まれる銘柄はsource:holding、それ以外はsource:pipeline", async () => {
+  process.env.CF_ACCOUNT_ID = "acc";
+  process.env.CF_D1_DATABASE_ID = "db";
+  process.env.CF_API_TOKEN = "tok";
+  const originalFetch = global.fetch;
+  const capturedBodies = [];
+  global.fetch = async (url, opts) => {
+    capturedBodies.push(JSON.parse(opts.body));
+    return new Response(
+      JSON.stringify({ success: true, result: [{ results: [], meta: { last_row_id: 1 } }] }),
+      { status: 200 }
+    );
+  };
+  try {
+    const { saveToD1 } = await import("../src/pipelineD1.js");
+    await saveToD1(
+      { predictionExecutedAt: "2026-09-21T06:00:00Z", cutoffDate: "2026-09-19" },
+      {
+        stocks: [],
+        pricesByCode: new Map(),
+        financialsByCode: new Map(),
+        analysisResults: [
+          { code: "7203", score: 80, positiveFactors: [], negativeFactors: [] },
+          { code: "1301", score: 60, positiveFactors: [], negativeFactors: [] },
+        ],
+        heldExtraCodes: new Set(["1301"]),
+      }
+    );
+    const inserts = capturedBodies.filter((b) => b.sql.includes("INSERT INTO ai_evaluations"));
+    assert.equal(inserts.find((b) => b.params[0] === "7203").params[17], "pipeline");
+    assert.equal(inserts.find((b) => b.params[0] === "1301").params[17], "holding");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+await test("saveToD1: heldExtraCodes省略時は全てsource:pipeline（既存動作の回帰確認）", async () => {
+  process.env.CF_ACCOUNT_ID = "acc";
+  process.env.CF_D1_DATABASE_ID = "db";
+  process.env.CF_API_TOKEN = "tok";
+  const originalFetch = global.fetch;
+  const capturedBodies = [];
+  global.fetch = async (url, opts) => {
+    capturedBodies.push(JSON.parse(opts.body));
+    return new Response(
+      JSON.stringify({ success: true, result: [{ results: [], meta: { last_row_id: 1 } }] }),
+      { status: 200 }
+    );
+  };
+  try {
+    const { saveToD1 } = await import("../src/pipelineD1.js");
+    await saveToD1(
+      { predictionExecutedAt: "2026-09-21T06:00:00Z", cutoffDate: "2026-09-19" },
+      { stocks: [], pricesByCode: new Map(), financialsByCode: new Map(), analysisResults: [{ code: "7203", score: 80, positiveFactors: [], negativeFactors: [] }] }
+    );
+    const insert = capturedBodies.find((b) => b.sql.includes("INSERT INTO ai_evaluations"));
+    assert.equal(insert.params[17], "pipeline");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 console.log(`\n[test] ${passed}件成功`);
 if (process.exitCode) {
   console.error("[test] 失敗したテストがあります");

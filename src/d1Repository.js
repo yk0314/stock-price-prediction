@@ -135,6 +135,43 @@ export async function saveAiEvaluationsToD1(d1, evaluations) {
 }
 
 /**
+ * 現在保有中(数量>0)の銘柄コード一覧を取得する。
+ * worker/src/index.jsのcomputePositionFromTrades()と同じ移動平均法のロジックを、
+ * GitHub Actions側(REST APIクライアントのd1.js経由)向けに実装したもの
+ * （env.DBネイティブバインディングが使えないGitHub Actions環境向けの複製。
+ *  ロジック自体は完全に同一である必要があるため、変更する場合は両方を揃えること）。
+ */
+export async function fetchHeldCodes(d1) {
+  const rows = await d1.query(
+    `SELECT code, transaction_type, transaction_date, quantity, price, id FROM trades ORDER BY transaction_date ASC, id ASC`
+  );
+
+  const byCode = new Map();
+  for (const r of rows) {
+    if (!byCode.has(r.code)) byCode.set(r.code, []);
+    byCode.get(r.code).push(r);
+  }
+
+  const heldCodes = [];
+  for (const [code, trades] of byCode.entries()) {
+    let quantity = 0;
+    let avgCost = 0;
+    for (const t of trades) {
+      if (t.transaction_type === "buy") {
+        const totalCost = avgCost * quantity + t.price * t.quantity;
+        quantity += t.quantity;
+        avgCost = quantity > 0 ? totalCost / quantity : 0;
+      } else if (t.transaction_type === "sell") {
+        quantity -= t.quantity;
+      }
+    }
+    if (quantity > 0) heldCodes.push(code);
+  }
+
+  return heldCodes;
+}
+
+/**
  * エラーログをD1へ記録する（Cron等の自動実行での障害追跡用）。
  * これ自体が失敗してもパイプラインを止めないよう、呼び出し側でtry/catchすること。
  */
