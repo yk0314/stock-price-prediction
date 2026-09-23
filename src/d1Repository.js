@@ -30,6 +30,26 @@ export async function saveStockPricesToD1(d1, pricesByCode, dataSource = "jquant
     }
   }
 
+  // ▼▼▼ 一時デバッグ（原因特定用。確認後に削除すること） ▼▼▼
+  const keyCount = new Map();
+  for (const [code, date] of rows.map((r) => [r[0], r[1]])) {
+    const key = `${code}|${date}`;
+    keyCount.set(key, (keyCount.get(key) ?? 0) + 1);
+  }
+  const uniqueKeyCount = keyCount.size;
+  const duplicateEntries = [...keyCount.entries()].filter(([, count]) => count > 1);
+  const duplicateRowCount = duplicateEntries.reduce((sum, [, count]) => sum + (count - 1), 0);
+  console.log(
+    `[DEBUG-D1Repo] saveStockPricesToD1: 総行数=${rows.length}, (code,date)ユニーク数=${uniqueKeyCount}, 重複行数=${duplicateRowCount}`
+  );
+  if (duplicateEntries.length > 0) {
+    console.log(
+      `[DEBUG-D1Repo] 重複の具体例(先頭5件):`,
+      duplicateEntries.slice(0, 5).map(([key, count]) => `${key} x${count}`)
+    );
+  }
+  // ▲▲▲ 一時デバッグここまで ▲▲▲
+
   return d1.batchInsertOrReplace("stock_prices", columns, rows);
 }
 

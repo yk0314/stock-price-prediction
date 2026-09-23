@@ -16,11 +16,6 @@ export class D1Client {
     this.apiToken = apiToken;
   }
 
-  /**
-   * SQLクエリを実行し、rowsだけでなくmeta情報（last_row_id等）も含めた
-   * 結果オブジェクト全体を返す。INSERT後にIDを取得したい場合に使う。
-   * @returns {Promise<{results: Array<object>, meta: object}>}
-   */
   async run(sql, params = []) {
     const url = `${D1_API_BASE}/accounts/${this.accountId}/d1/database/${this.databaseId}/query`;
     const res = await fetch(url, {
@@ -41,27 +36,15 @@ export class D1Client {
     if (!json.success) {
       throw new Error(`D1クエリ失敗: ${JSON.stringify(json.errors ?? json)}`);
     }
-    // D1のqueryエンドポイントは result が配列（複数ステートメント対応）で返る。
     const first = Array.isArray(json.result) ? json.result[0] : json.result;
     return { results: first?.results ?? [], meta: first?.meta ?? {} };
   }
 
-  /**
-   * SQLクエリを実行する。プレースホルダは "?" を使う（SQLインジェクション対策）。
-   * @param {string} sql
-   * @param {Array<any>} params
-   * @returns {Promise<Array<object>>} 結果行の配列（SELECT以外は空配列）
-   */
   async query(sql, params = []) {
     const { results } = await this.run(sql, params);
     return results;
   }
 
-  /**
-   * 複数のSQL文をまとめて実行する（マイグレーション適用等に使う）。
-   * D1のqueryエンドポイントは1リクエストに1ステートメントが基本のため、
-   * ここではセミコロン区切りで分割して順番に実行する。
-   */
   async executeBatch(sqlText) {
     const statements = sqlText
       .split(";")
@@ -72,27 +55,10 @@ export class D1Client {
     }
   }
 
-  /**
-   * 大量の行を「INSERT OR REPLACE」でまとめて書き込む。
-   * 全銘柄対応で1回のパイプライン実行につき数千行を書き込むケースを想定し、
-   * 1行ずつAPIを呼ぶ非効率を避けるため、複数行を1つのSQL文にまとめる。
-   * PRIMARY KEYが重複した場合は上書きする（同じ日付のデータを再実行しても安全）。
-   *
-   * 【重要】Cloudflare D1は1クエリあたりのバインド変数（?の数）が最大100個に制限されている
-   * （SQLite標準の999ではなく、D1独自の制限）。実データ検証で
-   * 「too many SQL variables」エラーが発生したため、列数に応じて
-   * 1チャンクあたりの行数を自動計算し、必ず上限を下回るようにする。
-   *
-   * @param {string} table
-   * @param {Array<string>} columns
-   * @param {Array<Array<any>>} rows - 各行の値の配列（columnsと同じ順序）
-   * @param {number} [chunkSize] - 1リクエストあたりの最大行数（省略時は列数から自動計算）
-   * @returns {Promise<number>} 書き込んだ総行数
-   */
   async batchInsertOrReplace(table, columns, rows, chunkSize) {
     if (rows.length === 0) return 0;
 
-    const D1_MAX_BOUND_PARAMS = 100; // Cloudflare D1の上限(SQLiteの999ではない)
+    const D1_MAX_BOUND_PARAMS = 100;
     const safeRowsPerChunk = Math.max(1, Math.floor(D1_MAX_BOUND_PARAMS / columns.length));
     const effectiveChunkSize = chunkSize
       ? Math.min(chunkSize, safeRowsPerChunk)
@@ -101,18 +67,57 @@ export class D1Client {
     const columnList = columns.join(", ");
     let written = 0;
 
+    // ▼▼▼ 一時デバッグ（原因特定用。確認後に削除すること） ▼▼▼
+    let debugTotalRequested = 0;
+    let debugTotalChanges = 0;
+    let debugChunkIndex = 0;
+    const debugTotalChunks = Math.ceil(rows.length / effectiveChunkSize);
+    // ▲▲▲ 一時デバッグここまで ▲▲▲
+
     for (let i = 0; i < rows.length; i += effectiveChunkSize) {
       const chunk = rows.slice(i, i + effectiveChunkSize);
       const placeholders = chunk
         .map(() => `(${columns.map(() => "?").join(", ")})`)
         .join(", ");
       const params = chunk.flat();
-      await this.query(
-        `INSERT OR REPLACE INTO ${table} (${columnList}) VALUES ${placeholders}`,
-        params
-      );
+
+      // ▼▼▼ 一時デバッグ（原因特定用。確認後に削除すること） ▼▼▼
+      debugChunkIndex++;
+      debugTotalRequested += chunk.length;
+      try {
+        const { meta } = await this.run(
+          `INSERT OR REPLACE INTO ${table} (${columnList}) VALUES ${placeholders}`,
+          params
+        );
+        const changes = meta?.changes ?? null;
+        if (changes !== null) debugTotalChanges += changes;
+        // 全チャンクを出すとログが膨大になるため、table=stock_pricesの時だけ・
+        // 最初の3件と、requested!==changesの異常時だけ詳細ログを出す
+        if (table === "stock_prices" && (debugChunkIndex <= 3 || changes !== chunk.length)) {
+          console.log(
+            `[DEBUG-D1] batchInsertOrReplace(${table}) chunk ${debugChunkIndex}/${debugTotalChunks}: ` +
+              `requested=${chunk.length}, meta.changes=${changes}, success=true`
+          );
+        }
+      } catch (err) {
+        console.log(
+          `[DEBUG-D1] batchInsertOrReplace(${table}) chunk ${debugChunkIndex}/${debugTotalChunks}: ` +
+            `requested=${chunk.length}, success=false, error=${err.message}`
+        );
+        throw err;
+      }
+      // ▲▲▲ 一時デバッグここまで ▲▲▲
+
       written += chunk.length;
     }
+
+    // ▼▼▼ 一時デバッグ（原因特定用。確認後に削除すること） ▼▼▼
+    if (table === "stock_prices") {
+      console.log(
+        `[DEBUG-D1] batchInsertOrReplace(${table}) 合計: requested=${debugTotalRequested} / actualChanges=${debugTotalChanges}`
+      );
+    }
+    // ▲▲▲ 一時デバッグここまで ▲▲▲
 
     return written;
   }
