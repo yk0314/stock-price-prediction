@@ -393,14 +393,21 @@ function validateTradeInput(body) {
  * POST /api/trades を処理する。
  * buyの場合、登録時点でその銘柄の最新AI評価(ai_evaluations)を検索しpurchase_evaluation_idに紐付ける。
  * sellの場合、現在の保有数量を超える売却をエラーで弾く（誤登録の簡易チェック）。
+ * codeがKVのstocks一覧に存在しない場合は、実在しない銘柄コードとして登録を拒否する
+ * （J-Quantsへの追加API呼び出しは行わず、既に取得済みのKVデータのみで確認する）。
  */
-async function handleCreateTrade(db, body) {
+async function handleCreateTrade(db, kv, body) {
   const validationError = validateTradeInput(body);
   if (validationError) {
     return { status: 400, body: { error: validationError } };
   }
 
   const { code, transactionType, quantity, price, transactionDate, memo } = body;
+
+  const { nameByCode } = await buildStockLookupMaps(kv);
+  if (!nameByCode.has(code)) {
+    return { status: 400, body: { error: "銘柄コードが存在しません。コードを確認してください。" } };
+  }
 
   if (transactionType === "sell") {
     const existingRows = await fetchAllTradeRows(db, code);
@@ -649,7 +656,7 @@ export default {
           return jsonResponse({ error: "リクエスト本文がJSONとして解釈できません。" }, 400);
         }
         try {
-          const { status, body: responseBody } = await handleCreateTrade(env.DB, body);
+          const { status, body: responseBody } = await handleCreateTrade(env.DB, env.STOCK_KV, body);
           return jsonResponse(responseBody, status);
         } catch (err) {
           console.error(`[worker] POST /api/trades 失敗: ${err.message}`);

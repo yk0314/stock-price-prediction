@@ -1591,6 +1591,10 @@ function makeFakeTradesD1({ trades = [], latestEvaluationIdByCode = {}, latestEv
   };
 }
 
+const STOCKS_FIXTURE = [
+  { code: "7203", name: "トヨタ自動車", market: "プライム", price: 2800, dataAsOf: "2026-09-19" },
+];
+
 await test("POST /api/trades: buy登録で最新AI評価が自動で紐付く", async () => {
   const worker = (await import("../worker/src/index.js")).default;
   const db = makeFakeTradesD1({ latestEvaluationIdByCode: { "7203": 42 } });
@@ -1598,7 +1602,7 @@ await test("POST /api/trades: buy登録で最新AI評価が自動で紐付く", 
     method: "POST",
     body: JSON.stringify({ code: "7203", transactionType: "buy", quantity: 100, price: 2800, transactionDate: "2026-09-01" }),
   });
-  const res = await worker.fetch(req, { DB: db, STOCK_KV: makeFakeKv({}) });
+  const res = await worker.fetch(req, { DB: db, STOCK_KV: makeFakeKv({ stocks: STOCKS_FIXTURE }) });
   assert.equal(res.status, 201);
   const body = await res.json();
   assert.equal(body.purchaseEvaluationId, 42);
@@ -1614,7 +1618,7 @@ await test("POST /api/trades: 保有数量を超えるsellは400", async () => {
     method: "POST",
     body: JSON.stringify({ code: "7203", transactionType: "sell", quantity: 200, price: 2900, transactionDate: "2026-09-10" }),
   });
-  const res = await worker.fetch(req, { DB: db, STOCK_KV: makeFakeKv({}) });
+  const res = await worker.fetch(req, { DB: db, STOCK_KV: makeFakeKv({ stocks: STOCKS_FIXTURE }) });
   assert.equal(res.status, 400);
 });
 
@@ -1625,13 +1629,43 @@ await test("POST /api/trades: 不正な入力(quantity<=0, 不正なtransactionT
     method: "POST",
     body: JSON.stringify({ code: "7203", transactionType: "buy", quantity: 0, price: 2800, transactionDate: "2026-09-01" }),
   });
-  assert.equal((await worker.fetch(req1, { DB: db, STOCK_KV: makeFakeKv({}) })).status, 400);
+  assert.equal((await worker.fetch(req1, { DB: db, STOCK_KV: makeFakeKv({ stocks: STOCKS_FIXTURE }) })).status, 400);
 
   const req2 = new Request("https://example.com/api/trades", {
     method: "POST",
     body: JSON.stringify({ code: "7203", transactionType: "hoge", quantity: 10, price: 100, transactionDate: "2026-09-01" }),
   });
-  assert.equal((await worker.fetch(req2, { DB: db, STOCK_KV: makeFakeKv({}) })).status, 400);
+  assert.equal((await worker.fetch(req2, { DB: db, STOCK_KV: makeFakeKv({ stocks: STOCKS_FIXTURE }) })).status, 400);
+});
+
+await test("POST /api/trades: stocks一覧に存在しない銘柄コードは400(buy/sell共通、D1にも登録されない)", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const db = makeFakeTradesD1({});
+  const reqBuy = new Request("https://example.com/api/trades", {
+    method: "POST",
+    body: JSON.stringify({ code: "7023", transactionType: "buy", quantity: 20, price: 2000, transactionDate: "2026-09-19" }),
+  });
+  const resBuy = await worker.fetch(reqBuy, { DB: db, STOCK_KV: makeFakeKv({ stocks: STOCKS_FIXTURE }) });
+  assert.equal(resBuy.status, 400);
+  assert.ok((await resBuy.json()).error.includes("銘柄コードが存在しません"));
+
+  const reqSell = new Request("https://example.com/api/trades", {
+    method: "POST",
+    body: JSON.stringify({ code: "7023", transactionType: "sell", quantity: 10, price: 2000, transactionDate: "2026-09-19" }),
+  });
+  const resSell = await worker.fetch(reqSell, { DB: db, STOCK_KV: makeFakeKv({ stocks: STOCKS_FIXTURE }) });
+  assert.equal(resSell.status, 400);
+});
+
+await test("POST /api/trades: 実在する銘柄コードは今まで通り登録できる（回帰確認）", async () => {
+  const worker = (await import("../worker/src/index.js")).default;
+  const db = makeFakeTradesD1({});
+  const req = new Request("https://example.com/api/trades", {
+    method: "POST",
+    body: JSON.stringify({ code: "7203", transactionType: "buy", quantity: 100, price: 2800, transactionDate: "2026-09-19" }),
+  });
+  const res = await worker.fetch(req, { DB: db, STOCK_KV: makeFakeKv({ stocks: STOCKS_FIXTURE }) });
+  assert.equal(res.status, 201);
 });
 
 await test("GET /api/trades: 移動平均法で実現損益・含み損益が正しく計算される", async () => {
