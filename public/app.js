@@ -1,5 +1,4 @@
 // Cloudflare Workers API のベースURL。
-// デプロイ後、実際のWorkers URL（例: https://jp-stock-ai-app-api.your-subdomain.workers.dev）に置き換えること。
 const API_BASE = "https://jp-stock-ai-app-api.yk0314.workers.dev";
 
 async function fetchJson(path) {
@@ -23,7 +22,18 @@ function percentClass(value) {
   return value > 0 ? "positive" : value < 0 ? "negative" : "";
 }
 
-// rating("BUY"/"HOLD"/"SELL")・risk("LOW"/"MEDIUM"/"HIGH")を日本語ラベル+バッジ用クラスに変換
+function formatYen(value) {
+  if (value === null || value === undefined) return "-";
+  return `¥${Math.round(Number(value)).toLocaleString()}`;
+}
+
+function formatSignedYen(value) {
+  if (value === null || value === undefined) return "-";
+  const rounded = Math.round(Number(value));
+  const sign = rounded > 0 ? "+" : "";
+  return `${sign}¥${rounded.toLocaleString()}`;
+}
+
 const RATING_LABELS = { BUY: "買い", HOLD: "様子見", SELL: "売り" };
 const RISK_LABELS = { LOW: "低", MEDIUM: "中", HIGH: "高" };
 
@@ -36,7 +46,178 @@ function ratingBadge(rating) {
 function riskBadge(risk) {
   const label = RISK_LABELS[risk] ?? risk ?? "-";
   const cls = (risk ?? "").toLowerCase();
-  return `<span class="badge badge-risk badge-risk-${cls}">リスク${label}</span>`;
+  return `<span class="badge badge-risk badge-risk-${cls}">${label}リスク</span>`;
+}
+
+// ---- ランキングの並び替え・絞り込み ----
+
+const RATING_SORT_ORDER = { BUY: 0, HOLD: 1, SELL: 2 };
+const RISK_SORT_ORDER = { LOW: 0, MEDIUM: 1, HIGH: 2 };
+
+/**
+ * 保有中の銘柄をランキングから除外する。APIのデータ構造・順序ロジックには手を入れず、
+ * Frontend側でクライアントサイドフィルタ+ソートするだけに留める。
+ */
+function excludeHeldCodes(ranking, heldCodes) {
+  return ranking.filter((r) => !heldCodes.has(r.code));
+}
+
+/**
+ * BUY優先 → 低リスク優先 → 期待リターン大きい順 → 想定保有日数短い順、の多段階ソート。
+ */
+function sortRankingForDisplay(ranking) {
+  return [...ranking].sort((a, b) => {
+    const ratingDiff = (RATING_SORT_ORDER[a.rating] ?? 99) - (RATING_SORT_ORDER[b.rating] ?? 99);
+    if (ratingDiff !== 0) return ratingDiff;
+    const riskDiff = (RISK_SORT_ORDER[a.risk] ?? 99) - (RISK_SORT_ORDER[b.risk] ?? 99);
+    if (riskDiff !== 0) return riskDiff;
+    const returnDiff = (b.expectedReturn ?? -Infinity) - (a.expectedReturn ?? -Infinity);
+    if (returnDiff !== 0) return returnDiff;
+    return (a.expectedHoldingDays ?? Infinity) - (b.expectedHoldingDays ?? Infinity);
+  });
+}
+
+// ---- 保有銘柄の「今どうすべきか」判定(UI表示用の簡易ヒント。バックエンドの判定ロジックは追加しない) ----
+
+function judgeHoldingAttention(holding) {
+  const evaluation = holding.latestEvaluation;
+  if (!evaluation) {
+    return { needsAttention: false, hint: "AI評価待ち", hintClass: "" };
+  }
+  if (evaluation.rating === "SELL") {
+    return { needsAttention: true, reason: "SELL評価", hint: "売却を検討", hintClass: "action-hint-sell" };
+  }
+  if (evaluation.rating === "HOLD" && evaluation.risk === "HIGH") {
+    return { needsAttention: true, reason: "HOLDだが高リスク", hint: "様子見・要注意", hintClass: "action-hint-hold" };
+  }
+  if (evaluation.expectedReturn !== null && evaluation.expectedReturn !== undefined && evaluation.expectedReturn < 0) {
+    return { needsAttention: true, reason: "期待リターンがマイナス", hint: "売却を検討", hintClass: "action-hint-sell" };
+  }
+  if (evaluation.rating === "BUY") {
+    return { needsAttention: false, hint: "保有継続・追加も選択肢", hintClass: "action-hint-buy" };
+  }
+  return { needsAttention: false, hint: "保有継続", hintClass: "action-hint-hold" };
+}
+
+// ---- ナビゲーション ----
+
+function setActiveNav(route) {
+  document.querySelectorAll(".top-nav-link, .bottom-nav-link").forEach((el) => {
+    el.classList.toggle("active", el.dataset.route === route);
+  });
+}
+
+// ---- ホーム画面 ----
+
+function renderAlertZone(holdings) {
+  const el = document.getElementById("home-alert-zone");
+  if (holdings.length === 0) {
+    el.innerHTML = `
+      <div class="alert-zone">
+        <div class="alert-zone-head"><h2>今すぐ確認</h2></div>
+        <div class="no-data">保有銘柄がありません。売買履歴から取引を登録すると、ここに表示されます。</div>
+      </div>
+    `;
+    return;
+  }
+
+  const attentionList = holdings
+    .map((h) => ({ holding: h, judgement: judgeHoldingAttention(h) }))
+    .filter((x) => x.judgement.needsAttention);
+
+  if (attentionList.length === 0) {
+    el.innerHTML = `
+      <div class="alert-zone">
+        <div class="alert-zone-head"><h2>今すぐ確認</h2></div>
+        <div class="alert-calm">
+          <span class="alert-calm-icon">✓</span>
+          <span>現在、緊急に確認が必要な保有銘柄はありません。</span>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="alert-zone">
+      <div class="alert-zone-head">
+        <h2>今すぐ確認</h2>
+        <span class="alert-count">${attentionList.length}件</span>
+      </div>
+      ${attentionList
+        .map(({ holding, judgement }) => `
+          <a class="alert-card" href="#/stock/${encodeURIComponent(holding.code)}">
+            <div class="alert-card-top">
+              ${ratingBadge(holding.latestEvaluation.rating)}
+              ${riskBadge(holding.latestEvaluation.risk)}
+              <span class="stock-code">${holding.code}</span>
+              <span class="stock-name">${holding.name ?? "銘柄名未取得"}</span>
+            </div>
+            <div class="alert-reason">
+              ${judgement.reason} ／ 保有 ${holding.quantity.toLocaleString()}株 ／
+              評価損益 <span class="num ${percentClass(holding.unrealizedPnl)}">${formatSignedYen(holding.unrealizedPnl)}</span>
+              (${formatPercent(holding.unrealizedPnlPct !== null ? Math.round(holding.unrealizedPnlPct * 10) / 10 : null)})
+            </div>
+          </a>
+        `)
+        .join("")}
+    </div>
+  `;
+}
+
+function renderStatsStrip(holdings, meta) {
+  const el = document.getElementById("home-stats");
+  const totalPnl = holdings.reduce((sum, h) => sum + (h.unrealizedPnl ?? 0), 0);
+  const hasPnl = holdings.some((h) => h.unrealizedPnl !== null);
+  el.innerHTML = `
+    <div class="stat-cell">
+      <div class="stat-label">保有銘柄数</div>
+      <div class="stat-value num">${holdings.length}</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">評価損益合計</div>
+      <div class="stat-value num ${percentClass(totalPnl)}">${hasPnl ? formatSignedYen(totalPnl) : "-"}</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">データ基準日</div>
+      <div class="stat-value num">${meta?.cutoffDate ?? "-"}</div>
+    </div>
+  `;
+}
+
+async function loadHome() {
+  const rankingPreviewEl = document.getElementById("home-ranking-preview");
+  const holdingsPreviewEl = document.getElementById("home-holdings-preview");
+  document.getElementById("home-alert-zone").innerHTML = "読み込み中...";
+  document.getElementById("home-stats").innerHTML = "";
+  rankingPreviewEl.textContent = "読み込み中...";
+  holdingsPreviewEl.textContent = "読み込み中...";
+
+  try {
+    const [ranking, holdings, meta] = await Promise.all([
+      fetchJson("/api/ranking"),
+      fetchJson("/api/holdings"),
+      fetchJson("/api/meta"),
+    ]);
+
+    renderAlertZone(holdings);
+    renderStatsStrip(holdings, meta);
+
+    const heldCodes = new Set(holdings.map((h) => h.code));
+    const displayRanking = sortRankingForDisplay(excludeHeldCodes(ranking, heldCodes)).slice(0, 4);
+    rankingPreviewEl.innerHTML = displayRanking.length
+      ? displayRanking.map((item, i) => renderRankingCard(item, i + 1)).join("")
+      : `<div class="no-data">現在、購入候補となる評価結果がありません。</div>`;
+
+    const sortedHoldings = sortHoldingsByAcquisitionDesc(holdings, await getLatestBuyDateByCode());
+    holdingsPreviewEl.innerHTML = sortedHoldings.length
+      ? sortedHoldings.slice(0, 3).map(renderHoldingCard).join("")
+      : `<div class="no-data">保有銘柄がありません。</div>`;
+  } catch (err) {
+    document.getElementById("home-alert-zone").innerHTML = `<div class="no-data">データを取得できませんでした。</div>`;
+    rankingPreviewEl.innerHTML = "";
+    holdingsPreviewEl.innerHTML = "";
+  }
 }
 
 // ---- ランキング画面 ----
@@ -48,16 +229,10 @@ function renderMeta(meta) {
     return;
   }
   el.textContent =
-    `データ基準日: ${meta.cutoffDate} ／ ` +
-    `最終更新: ${meta.predictionExecutedAt ? meta.predictionExecutedAt.slice(0, 16).replace("T", " ") : "-"} ／ ` +
-    `対象ユニバース: ${meta.universeCodeCount ?? "-"}銘柄`;
+    `データ基準日: ${meta.cutoffDate} ／ 更新: ${meta.predictionExecutedAt ? meta.predictionExecutedAt.slice(0, 16).replace("T", " ") : "-"}`;
 }
 
 function renderRankingCard(item, rank) {
-  const priceLabel =
-    item.priceAtEvaluation !== null && item.priceAtEvaluation !== undefined
-      ? `¥${Number(item.priceAtEvaluation).toLocaleString()}`
-      : "-";
   return `
     <a class="rank-card" href="#/stock/${encodeURIComponent(item.code)}" data-code="${item.code}">
       <div class="rank-card-top">
@@ -75,15 +250,15 @@ function renderRankingCard(item, rank) {
       <div class="rank-card-metrics">
         <div class="metric">
           <span class="metric-label">評価時株価</span>
-          <span class="metric-value">${priceLabel}</span>
+          <span class="metric-value num">${formatYen(item.priceAtEvaluation)}</span>
         </div>
         <div class="metric">
           <span class="metric-label">期待リターン</span>
-          <span class="metric-value ${percentClass(item.expectedReturn)}">${formatPercent(item.expectedReturn)}</span>
+          <span class="metric-value num ${percentClass(item.expectedReturn)}">${formatPercent(item.expectedReturn)}</span>
         </div>
         <div class="metric">
           <span class="metric-label">想定保有日数</span>
-          <span class="metric-value">${item.expectedHoldingDays ?? "-"}日</span>
+          <span class="metric-value num">${item.expectedHoldingDays ?? "-"}日</span>
         </div>
       </div>
       ${item.summary ? `<p class="rank-card-summary">${item.summary}</p>` : ""}
@@ -96,52 +271,40 @@ async function loadRanking() {
   const el = document.getElementById("ranking-list");
   el.textContent = "読み込み中...";
   try {
-    const ranking = await fetchJson("/api/ranking");
-    el.innerHTML = ranking.length
-      ? ranking.map((item, i) => renderRankingCard(item, i + 1)).join("")
-      : "現在、AI評価結果がありません。";
+    const [ranking, holdings] = await Promise.all([fetchJson("/api/ranking"), fetchJson("/api/holdings")]);
+    const heldCodes = new Set(holdings.map((h) => h.code));
+    const display = sortRankingForDisplay(excludeHeldCodes(ranking, heldCodes));
+    el.innerHTML = display.length
+      ? display.map((item, i) => renderRankingCard(item, i + 1)).join("")
+      : `<div class="no-data">現在、表示できる評価結果がありません（保有銘柄は除外されています）。</div>`;
   } catch (err) {
-    el.textContent = "現在データを取得できませんでした。しばらくしてから再度お試しください。";
-  }
-}
-
-async function loadMeta() {
-  try {
-    const meta = await fetchJson("/api/meta");
-    renderMeta(meta);
-  } catch {
-    renderMeta(null);
+    el.innerHTML = `<div class="no-data">現在データを取得できませんでした。しばらくしてから再度お試しください。</div>`;
   }
 }
 
 // ---- 銘柄詳細画面 ----
 
 function formatDateShort(dateStr) {
-  // "2026-09-19" -> "9/19"
   if (!dateStr) return "";
   const parts = dateStr.split("-");
   return parts.length === 3 ? `${Number(parts[1])}/${Number(parts[2])}` : dateStr;
 }
 
-/**
- * 株価履歴(close配列)から、外部ライブラリ無しのシンプルなSVG折れ線チャートを描く。
- * プロジェクト全体の「外部npmパッケージ不使用」方針に合わせ、Canvasやチャートライブラリは使わない。
- */
 function renderPriceChart(prices) {
   if (!prices || prices.length === 0) {
-    return `<p class="no-data">株価データがありません（この銘柄はスクリーニングプール対象外の可能性があります）。</p>`;
+    return `<div class="no-data">株価データがありません（この銘柄はスクリーニングプール対象外の可能性があります）。</div>`;
   }
 
   const width = 640;
   const height = 220;
-  const padding = { top: 12, right: 12, bottom: 24, left: 52 };
+  const padding = { top: 12, right: 12, bottom: 24, left: 58 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
 
   const closes = prices.map((p) => p.close).filter((c) => c !== null && c !== undefined);
   const min = Math.min(...closes);
   const max = Math.max(...closes);
-  const range = max - min || 1; // 全て同値の場合のゼロ割回避
+  const range = max - min || 1;
 
   const points = prices.map((p, i) => {
     const x = padding.left + (i / Math.max(prices.length - 1, 1)) * plotWidth;
@@ -149,15 +312,11 @@ function renderPriceChart(prices) {
     return { x, y, ...p };
   });
 
-  const pathD = points
-    .map((pt, i) => `${i === 0 ? "M" : "L"} ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`)
-    .join(" ");
-
+  const pathD = points.map((pt, i) => `${i === 0 ? "M" : "L"} ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`).join(" ");
   const last = points[points.length - 1];
   const first = points[0];
   const trendClass = last.close >= first.close ? "positive" : "negative";
 
-  // Y軸目盛り(最大・中央・最小の3本)
   const yTicks = [max, (max + min) / 2, min];
   const yTickSvg = yTicks
     .map((v) => {
@@ -169,7 +328,6 @@ function renderPriceChart(prices) {
     })
     .join("");
 
-  // X軸ラベル(先頭・中央・末尾の日付のみ、混雑を避ける)
   const xLabelIndexes = [0, Math.floor((points.length - 1) / 2), points.length - 1];
   const xTickSvg = [...new Set(xLabelIndexes)]
     .map((i) => {
@@ -186,16 +344,14 @@ function renderPriceChart(prices) {
         <circle cx="${last.x.toFixed(1)}" cy="${last.y.toFixed(1)}" r="3.5" class="chart-last-point" />
         ${xTickSvg}
       </svg>
-      <div class="chart-range-note">
-        表示期間: ${prices[0].date} 〜 ${prices[prices.length - 1].date}（${prices.length}営業日分）
-      </div>
+      <div class="chart-range-note">表示期間: ${prices[0].date} 〜 ${prices[prices.length - 1].date}（${prices.length}営業日分）</div>
     </div>
   `;
 }
 
 function renderEvaluationBlock(evaluation) {
   if (!evaluation) {
-    return `<p class="no-data">この銘柄はAI分析の対象外でした（スクリーニングで選定された候補のみ分析されます）。</p>`;
+    return `<div class="no-data">この銘柄はAI分析の対象外でした（スクリーニングで選定された候補のみ分析されます）。</div>`;
   }
   return `
     <div class="eval-block">
@@ -207,29 +363,27 @@ function renderEvaluationBlock(evaluation) {
       <div class="detail-metrics">
         <div class="metric">
           <span class="metric-label">期待リターン</span>
-          <span class="metric-value ${percentClass(evaluation.expectedReturn)}">${formatPercent(evaluation.expectedReturn)}</span>
+          <span class="metric-value num ${percentClass(evaluation.expectedReturn)}">${formatPercent(evaluation.expectedReturn)}</span>
         </div>
         <div class="metric">
           <span class="metric-label">想定保有日数</span>
-          <span class="metric-value">${evaluation.expectedHoldingDays ?? "-"}日</span>
+          <span class="metric-value num">${evaluation.expectedHoldingDays ?? "-"}日</span>
         </div>
         <div class="metric">
           <span class="metric-label">上昇確率</span>
-          <span class="metric-value">${evaluation.upsideProbability ?? "-"}%</span>
+          <span class="metric-value num">${evaluation.upsideProbability ?? "-"}%</span>
         </div>
         <div class="metric">
           <span class="metric-label">下落リスク</span>
-          <span class="metric-value">${evaluation.downsideRisk ?? "-"}%</span>
+          <span class="metric-value num">${evaluation.downsideRisk ?? "-"}%</span>
         </div>
         <div class="metric">
           <span class="metric-label">信頼度</span>
-          <span class="metric-value">${evaluation.confidence ?? "-"}%</span>
+          <span class="metric-value num">${evaluation.confidence ?? "-"}%</span>
         </div>
         <div class="metric">
           <span class="metric-label">評価時株価</span>
-          <span class="metric-value">${
-            evaluation.priceAtEvaluation ? `¥${Number(evaluation.priceAtEvaluation).toLocaleString()}` : "-"
-          }</span>
+          <span class="metric-value num">${formatYen(evaluation.priceAtEvaluation)}</span>
         </div>
       </div>
       ${evaluation.summary ? `<p class="eval-summary">${evaluation.summary}</p>` : ""}
@@ -255,7 +409,7 @@ async function loadDetail(code) {
         ${stock.market ? `<span class="market-tag">${stock.market}</span>` : ""}
       </div>
       <div class="current-price-line">
-        現在価格: <strong>${stock.price ? `¥${Number(stock.price).toLocaleString()}` : "-"}</strong>
+        現在価格: <strong class="num">${formatYen(stock.price)}</strong>
         <span class="meta-line">（データ基準日: ${stock.dataAsOf ?? "-"}）</span>
       </div>
 
@@ -266,40 +420,89 @@ async function loadDetail(code) {
       ${renderEvaluationBlock(stock.latestEvaluation)}
     `;
   } catch (err) {
-    el.innerHTML = `<p class="no-data">この銘柄コードのデータを取得できませんでした（コードが正しいかご確認ください）。</p>`;
+    el.innerHTML = `<div class="no-data">この銘柄コードのデータを取得できませんでした（コードが正しいかご確認ください）。</div>`;
   }
 }
 
 // ---- 保有銘柄画面 ----
 
+let cachedLatestBuyDateByCode = null;
+
+/**
+ * 各銘柄コードについて、最も新しいBUY取引の約定日を取得する。
+ * /api/holdingsには取得日時が含まれていないため、/api/tradesから導出する
+ * （APIのデータ構造は変更せず、Frontend側で2つのAPIを組み合わせるだけに留める）。
+ */
+async function getLatestBuyDateByCode() {
+  if (cachedLatestBuyDateByCode) return cachedLatestBuyDateByCode;
+  try {
+    const trades = await fetchJson("/api/trades");
+    const map = new Map();
+    for (const t of trades) {
+      if (t.transactionType !== "buy") continue;
+      const current = map.get(t.code);
+      if (!current || t.transactionDate > current) {
+        map.set(t.code, t.transactionDate);
+      }
+    }
+    cachedLatestBuyDateByCode = map;
+    return map;
+  } catch {
+    return new Map();
+  }
+}
+
+function sortHoldingsByAcquisitionDesc(holdings, latestBuyDateByCode) {
+  return [...holdings].sort((a, b) => {
+    const dateA = latestBuyDateByCode.get(a.code) ?? "";
+    const dateB = latestBuyDateByCode.get(b.code) ?? "";
+    if (dateA === dateB) return 0;
+    return dateA < dateB ? 1 : -1; // 新しい日付が先
+  });
+}
+
 function renderHoldingCard(h) {
-  const pnlClass = percentClass(h.unrealizedPnl);
+  const judgement = judgeHoldingAttention(h);
   return `
-    <a class="rank-card" href="#/stock/${encodeURIComponent(h.code)}">
-      <div class="rank-card-top">
+    <a class="holding-card" href="#/stock/${encodeURIComponent(h.code)}">
+      <div class="holding-card-top">
         <div class="rank-card-title">
           <span class="stock-code">${h.code}</span>
           <span class="stock-name">${h.name ?? "銘柄名未取得"}</span>
         </div>
-        ${h.latestEvaluation ? ratingBadge(h.latestEvaluation.rating) : ""}
+        <div class="holding-pnl">
+          <div class="holding-pnl-value num ${percentClass(h.unrealizedPnl)}">${formatSignedYen(h.unrealizedPnl)}</div>
+          <div class="holding-pnl-pct num ${percentClass(h.unrealizedPnl)}">${formatPercent(
+    h.unrealizedPnlPct !== null ? Math.round(h.unrealizedPnlPct * 10) / 10 : null
+  )}</div>
+        </div>
       </div>
-      <div class="rank-card-metrics">
+      <div class="holding-card-badges">
+        ${h.latestEvaluation ? ratingBadge(h.latestEvaluation.rating) : ""}
+        ${h.latestEvaluation ? riskBadge(h.latestEvaluation.risk) : ""}
+      </div>
+      <div class="holding-metrics">
         <div class="metric">
           <span class="metric-label">保有数量</span>
-          <span class="metric-value">${h.quantity.toLocaleString()}株</span>
+          <span class="metric-value num">${h.quantity.toLocaleString()}株</span>
         </div>
         <div class="metric">
           <span class="metric-label">平均取得単価</span>
-          <span class="metric-value">¥${Math.round(h.avgCost).toLocaleString()}</span>
+          <span class="metric-value num">${formatYen(h.avgCost)}</span>
         </div>
         <div class="metric">
           <span class="metric-label">現在価格</span>
-          <span class="metric-value">${h.currentPrice ? `¥${Number(h.currentPrice).toLocaleString()}` : "-"}</span>
+          <span class="metric-value num">${formatYen(h.currentPrice)}</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">期待リターン</span>
+          <span class="metric-value num ${percentClass(h.latestEvaluation?.expectedReturn)}">${
+    h.latestEvaluation ? formatPercent(h.latestEvaluation.expectedReturn) : "-"
+  }</span>
         </div>
       </div>
-      <div class="pnl-line ${pnlClass}">
-        評価損益: ${h.unrealizedPnl !== null ? `${h.unrealizedPnl > 0 ? "+" : ""}¥${Math.round(h.unrealizedPnl).toLocaleString()}` : "-"}
-        （${formatPercent(h.unrealizedPnlPct !== null ? Math.round(h.unrealizedPnlPct * 10) / 10 : null)}）
+      <div class="holding-action-hint">
+        今どうすべきか: <span class="${judgement.hintClass}">${judgement.hint}</span>
       </div>
     </a>
   `;
@@ -309,39 +512,39 @@ async function loadHoldings() {
   const el = document.getElementById("holdings-list");
   el.textContent = "読み込み中...";
   try {
-    const holdings = await fetchJson("/api/holdings");
-    el.innerHTML = holdings.length
-      ? `<div class="ranking-grid">${holdings.map(renderHoldingCard).join("")}</div>`
-      : `<p class="no-data">現在保有中の銘柄はありません。</p>`;
+    const [holdings, latestBuyDateByCode] = await Promise.all([fetchJson("/api/holdings"), getLatestBuyDateByCode()]);
+    const sorted = sortHoldingsByAcquisitionDesc(holdings, latestBuyDateByCode);
+    el.innerHTML = sorted.length ? sorted.map(renderHoldingCard).join("") : `<div class="no-data">現在保有中の銘柄はありません。</div>`;
   } catch {
-    el.innerHTML = `<p class="no-data">保有銘柄を取得できませんでした。</p>`;
+    el.innerHTML = `<div class="no-data">保有銘柄を取得できませんでした。</div>`;
   }
 }
 
 // ---- 売買履歴画面 ----
 
-function renderTradeRow(t) {
+function renderTradeCard(t) {
   const typeLabel = t.transactionType === "buy" ? "買い" : "売り";
-  const typeClass = t.transactionType === "buy" ? "trade-type-buy" : "trade-type-sell";
-  const pnlLabel = t.pnlType === "realized" ? "実現損益" : "含み損益（参考）";
-  const pnlText =
-    t.pnl !== null
-      ? `${t.pnl > 0 ? "+" : ""}¥${Math.round(t.pnl).toLocaleString()}（${formatPercent(
-          t.pnlPct !== null ? Math.round(t.pnlPct * 10) / 10 : null
-        )}）`
-      : "-";
-  const winLabel = t.win === null ? "" : t.win ? `<span class="badge badge-buy">勝ち</span>` : `<span class="badge badge-sell">負け</span>`;
-
+  const typeClass = t.transactionType === "buy" ? "buy" : "sell";
+  const pnlLabel = t.pnlType === "realized" ? "実現損益" : "含み損益(参考)";
   return `
-    <tr>
-      <td>${t.transactionDate}</td>
-      <td><a href="#/stock/${encodeURIComponent(t.code)}">${t.code} ${t.name ?? ""}</a></td>
-      <td><span class="trade-type ${typeClass}">${typeLabel}</span></td>
-      <td>${t.quantity.toLocaleString()}株</td>
-      <td>¥${Number(t.price).toLocaleString()}</td>
-      <td class="${percentClass(t.pnl)}">${pnlLabel}<br />${pnlText} ${winLabel}</td>
-      <td class="meta-line">${t.memo ?? ""}</td>
-    </tr>
+    <a class="trade-card" href="#/stock/${encodeURIComponent(t.code)}">
+      <span class="trade-type-flag ${typeClass}">${typeLabel}</span>
+      <div class="trade-card-main">
+        <div class="trade-card-title">
+          <span class="stock-name">${t.code} ${t.name ?? ""}</span>
+        </div>
+        <div class="trade-card-sub">
+          <span>${t.transactionDate}</span>
+          <span class="num">${t.quantity.toLocaleString()}株</span>
+          <span class="num">${formatYen(t.price)}</span>
+          ${t.memo ? `<span>${t.memo}</span>` : ""}
+        </div>
+      </div>
+      <div class="trade-card-pnl">
+        <div class="trade-card-pnl-value num ${percentClass(t.pnl)}">${formatSignedYen(t.pnl)}</div>
+        <div class="trade-card-pnl-label">${pnlLabel}</div>
+      </div>
+    </a>
   `;
 }
 
@@ -350,18 +553,9 @@ async function loadTrades() {
   el.textContent = "読み込み中...";
   try {
     const trades = await fetchJson("/api/trades");
-    el.innerHTML = trades.length
-      ? `
-        <table class="trades-table">
-          <thead>
-            <tr><th>日付</th><th>銘柄</th><th>区分</th><th>数量</th><th>約定価格</th><th>損益</th><th>メモ</th></tr>
-          </thead>
-          <tbody>${trades.map(renderTradeRow).join("")}</tbody>
-        </table>
-      `
-      : `<p class="no-data">売買履歴はまだありません。</p>`;
+    el.innerHTML = trades.length ? trades.map(renderTradeCard).join("") : `<div class="no-data">売買履歴はまだありません。</div>`;
   } catch {
-    el.innerHTML = `<p class="no-data">売買履歴を取得できませんでした。</p>`;
+    el.innerHTML = `<div class="no-data">売買履歴を取得できませんでした。</div>`;
   }
 }
 
@@ -395,8 +589,8 @@ async function submitTradeForm(e) {
     messageEl.textContent = "登録しました。";
     messageEl.classList.add("form-message-success");
     document.getElementById("trade-form").reset();
+    cachedLatestBuyDateByCode = null; // 保有日時キャッシュを無効化
     loadTrades();
-    loadHoldings();
   } catch {
     messageEl.textContent = "通信エラーが発生しました。";
     messageEl.classList.add("form-message-error");
@@ -408,42 +602,60 @@ async function submitTradeForm(e) {
 // ---- 画面切り替え（ハッシュルーティング） ----
 
 function showView(name) {
+  document.getElementById("view-home").hidden = name !== "home";
   document.getElementById("view-ranking").hidden = name !== "ranking";
   document.getElementById("view-detail").hidden = name !== "detail";
   document.getElementById("view-holdings").hidden = name !== "holdings";
   document.getElementById("view-trades").hidden = name !== "trades";
+  window.scrollTo(0, 0);
 }
 
 function handleRoute() {
-  const hash = window.location.hash; // 例: "#/stock/7203", "#/holdings", "#/trades", "" / "#/"
+  const hash = window.location.hash;
   const stockMatch = hash.match(/^#\/stock\/([^/]+)$/);
   if (stockMatch) {
     const code = decodeURIComponent(stockMatch[1]);
     showView("detail");
+    setActiveNav(null);
     loadDetail(code);
+  } else if (hash === "#/ranking") {
+    showView("ranking");
+    setActiveNav("ranking");
+    loadRanking();
   } else if (hash === "#/holdings") {
     showView("holdings");
+    setActiveNav("holdings");
     loadHoldings();
   } else if (hash === "#/trades") {
     showView("trades");
+    setActiveNav("trades");
     loadTrades();
   } else {
-    showView("ranking");
+    showView("home");
+    setActiveNav("home");
+    loadHome();
   }
 }
 
 window.addEventListener("hashchange", handleRoute);
 document.getElementById("back-to-ranking").addEventListener("click", () => {
-  window.location.hash = "#/";
+  window.history.back();
 });
-document.getElementById("ranking-reload").addEventListener("click", () => {
-  loadMeta();
-  loadRanking();
+document.getElementById("ranking-reload").addEventListener("click", loadRanking);
+document.getElementById("holdings-reload").addEventListener("click", () => {
+  cachedLatestBuyDateByCode = null;
+  loadHoldings();
 });
-document.getElementById("holdings-reload").addEventListener("click", loadHoldings);
 document.getElementById("trades-reload").addEventListener("click", loadTrades);
 document.getElementById("trade-form").addEventListener("submit", submitTradeForm);
 
+async function loadMetaHeader() {
+  try {
+    renderMeta(await fetchJson("/api/meta"));
+  } catch {
+    renderMeta(null);
+  }
+}
+
 handleRoute();
-loadMeta();
-loadRanking();
+loadMetaHeader();

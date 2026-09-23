@@ -1,100 +1,375 @@
 :root {
-  --color-bg: #f5f6f8;
-  --color-surface: #ffffff;
-  --color-border: #e3e5e9;
-  --color-text: #1a1a1a;
-  --color-text-muted: #6b7280;
-  --color-buy: #0a7a2f;
-  --color-buy-bg: #e6f4ea;
-  --color-hold: #8a6d00;
-  --color-hold-bg: #fff6e0;
-  --color-sell: #b3261e;
-  --color-sell-bg: #fdeceb;
-  --color-risk-low: #0a7a2f;
-  --color-risk-medium: #b3730a;
-  --color-risk-high: #b3261e;
-  --radius: 10px;
+  --bg: #0b0f14;
+  --bg-elevated: #0f141a;
+  --surface: #131920;
+  --surface-raised: #1a222b;
+  --border: #232c37;
+  --border-strong: #333f4d;
+  --text: #edf1f5;
+  --text-muted: #8994a3;
+  --text-faint: #5c6674;
+
+  --accent: #e8b84b;
+  --accent-dim: rgba(232, 184, 75, 0.14);
+
+  --buy: #34d399;
+  --buy-bg: rgba(52, 211, 153, 0.12);
+  --sell: #f0625f;
+  --sell-bg: rgba(240, 98, 95, 0.13);
+  --hold: #9aa4b2;
+  --hold-bg: rgba(154, 164, 178, 0.12);
+
+  --risk-low: #34d399;
+  --risk-low-bg: rgba(52, 211, 153, 0.12);
+  --risk-medium: #e8b84b;
+  --risk-medium-bg: rgba(232, 184, 75, 0.12);
+  --risk-high: #f0625f;
+  --risk-high-bg: rgba(240, 98, 95, 0.13);
+
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 16px;
+
+  --font-ui: "Inter", -apple-system, "Hiragino Kaku Gothic ProN", "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
 }
 
 * {
   box-sizing: border-box;
 }
 
+html {
+  scroll-padding-top: 72px;
+}
+
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN", "Segoe UI", sans-serif;
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 16px;
-  color: var(--color-text);
-  background: var(--color-bg);
+  margin: 0;
+  font-family: var(--font-ui);
+  background: var(--bg);
+  color: var(--text);
   line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
-header {
-  border-bottom: 1px solid var(--color-border);
-  margin-bottom: 20px;
-  padding-bottom: 12px;
+a {
+  color: inherit;
 }
 
-header h1 {
-  font-size: 1.4em;
-  margin: 0 0 6px;
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
-.meta-info {
-  font-size: 0.85em;
-  color: var(--color-text-muted);
-  margin: 4px 0;
+/* ---- ヘッダー ---- */
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: rgba(11, 15, 20, 0.92);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+
+.app-header-inner {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  flex: 0 0 auto;
+}
+
+.brand-mark {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 0.78em;
+  letter-spacing: 0.02em;
+  color: var(--bg);
+  background: var(--accent);
+  border-radius: 6px;
+  padding: 3px 7px;
+}
+
+.brand-text {
+  font-weight: 700;
+  font-size: 1.02em;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.top-nav {
+  display: flex;
+  gap: 4px;
+  flex: 1 1 auto;
+}
+
+.top-nav-link {
+  text-decoration: none;
+  color: var(--text-muted);
+  font-size: 0.92em;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.top-nav-link:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.top-nav-link.active {
+  color: var(--bg);
+  background: var(--accent);
+}
+
+.header-meta {
+  flex: 0 0 auto;
+  font-size: 0.78em;
+  color: var(--text-faint);
+  text-align: right;
+  max-width: 260px;
+}
+
+/* ---- メイン・共通 ---- */
+
+.app-main {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px 20px 40px;
 }
 
 .disclaimer {
-  font-size: 0.78em;
-  color: #a15c00;
-  background: #fff6e5;
-  border: 1px solid #ffe0a3;
-  border-radius: 6px;
-  padding: 8px 10px;
-  margin-top: 8px;
+  font-size: 0.76em;
+  color: var(--text-faint);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin: 0 0 24px;
 }
 
 .section-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: 12px;
+  margin: 32px 0 6px;
+}
+
+.section-head:first-of-type {
+  margin-top: 0;
 }
 
 .section-head h2 {
+  font-size: 1.08em;
+  font-weight: 700;
   margin: 0;
-  font-size: 1.15em;
+  letter-spacing: -0.01em;
 }
 
-.reload-button,
-.back-button {
+.section-note {
+  font-size: 0.82em;
+  color: var(--text-muted);
+  margin: 0 0 16px;
+}
+
+.text-link {
   font-size: 0.85em;
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-surface);
-  color: var(--color-text);
-  cursor: pointer;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
 }
 
-.reload-button:hover,
-.back-button:hover {
-  background: #f0f1f3;
+.text-link:hover {
+  text-decoration: underline;
+}
+
+.ghost-button,
+.primary-button {
+  font-family: var(--font-ui);
+  font-size: 0.85em;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.ghost-button:hover {
+  background: var(--surface-raised);
+}
+
+.primary-button {
+  border: none;
+  background: var(--accent);
+  color: #1a1200;
+  padding: 12px;
+  font-weight: 700;
+}
+
+.primary-button:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .back-button {
-  margin-bottom: 16px;
+  margin-bottom: 18px;
 }
 
-/* ---- ランキングカードグリッド ---- */
+.no-data {
+  color: var(--text-muted);
+  font-size: 0.9em;
+  background: var(--surface);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 22px;
+  text-align: center;
+}
 
-.ranking-grid {
+/* ---- バッジ ---- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.74em;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  letter-spacing: 0.01em;
+}
+
+.badge-buy { color: var(--buy); background: var(--buy-bg); }
+.badge-hold { color: var(--hold); background: var(--hold-bg); }
+.badge-sell { color: var(--sell); background: var(--sell-bg); }
+
+.badge-risk-low { color: var(--risk-low); background: var(--risk-low-bg); }
+.badge-risk-medium { color: var(--risk-medium); background: var(--risk-medium-bg); }
+.badge-risk-high { color: var(--risk-high); background: var(--risk-high-bg); }
+
+.positive { color: var(--buy); }
+.negative { color: var(--sell); }
+
+/* ---- 今すぐ確認ゾーン(ホーム) ---- */
+
+.alert-zone {
+  margin-bottom: 28px;
+}
+
+.alert-zone-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.alert-zone-head h2 {
+  font-size: 1.05em;
+  font-weight: 700;
+  margin: 0;
+}
+
+.alert-count {
+  font-family: var(--font-mono);
+  font-size: 0.75em;
+  font-weight: 700;
+  color: var(--sell);
+  background: var(--sell-bg);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+
+.alert-card {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  background: linear-gradient(135deg, rgba(240, 98, 95, 0.09), var(--surface) 55%);
+  border: 1px solid rgba(240, 98, 95, 0.35);
+  border-left: 3px solid var(--sell);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 8px;
+}
+
+.alert-card:hover {
+  border-color: rgba(240, 98, 95, 0.55);
+}
+
+.alert-card-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.alert-reason {
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+
+.alert-calm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  color: var(--text-muted);
+  font-size: 0.92em;
+}
+
+.alert-calm-icon {
+  color: var(--buy);
+  font-size: 1.2em;
+}
+
+/* ---- 統計ストリップ(ホーム) ---- */
+
+.stats-strip {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 32px;
+}
+
+.stat-cell {
+  background: var(--surface);
+  padding: 14px 16px;
+}
+
+.stat-label {
+  font-size: 0.72em;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 1.25em;
+  font-weight: 700;
+}
+
+/* ---- カードグリッド(ランキング等) ---- */
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
   gap: 12px;
 }
 
@@ -102,15 +377,15 @@ header h1 {
   display: block;
   text-decoration: none;
   color: inherit;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 14px;
-  transition: box-shadow 0.15s ease, transform 0.15s ease;
+  padding: 15px;
+  transition: border-color 0.15s ease, transform 0.15s ease;
 }
 
 .rank-card:hover {
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+  border-color: var(--border-strong);
   transform: translateY(-1px);
 }
 
@@ -118,18 +393,20 @@ header h1 {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 8px;
+  margin-bottom: 9px;
 }
 
 .rank-number {
   flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
-  background: #eef0f3;
-  color: var(--color-text-muted);
-  font-size: 0.8em;
-  font-weight: bold;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 0.72em;
+  font-weight: 700;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -143,13 +420,15 @@ header h1 {
 }
 
 .stock-code {
-  font-size: 0.75em;
-  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.74em;
+  color: var(--text-faint);
+  letter-spacing: 0.02em;
 }
 
 .stock-name {
-  font-weight: bold;
-  font-size: 1em;
+  font-weight: 700;
+  font-size: 0.98em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -157,46 +436,32 @@ header h1 {
 
 .ai-score {
   flex: 0 0 auto;
+  font-family: var(--font-mono);
   font-size: 1.3em;
-  font-weight: bold;
+  font-weight: 700;
+  color: var(--accent);
 }
 
 .ai-score small {
   font-size: 0.5em;
-  font-weight: normal;
-  color: var(--color-text-muted);
+  font-weight: 500;
+  color: var(--text-faint);
 }
 
 .rank-card-badges {
   display: flex;
   gap: 6px;
-  margin-bottom: 10px;
+  margin-bottom: 11px;
 }
-
-.badge {
-  display: inline-block;
-  font-size: 0.75em;
-  font-weight: bold;
-  padding: 3px 9px;
-  border-radius: 999px;
-}
-
-.badge-buy { color: var(--color-buy); background: var(--color-buy-bg); }
-.badge-hold { color: var(--color-hold); background: var(--color-hold-bg); }
-.badge-sell { color: var(--color-sell); background: var(--color-sell-bg); }
-
-.badge-risk-low { color: var(--color-risk-low); background: var(--color-buy-bg); }
-.badge-risk-medium { color: var(--color-risk-medium); background: var(--color-hold-bg); }
-.badge-risk-high { color: var(--color-risk-high); background: var(--color-sell-bg); }
 
 .rank-card-metrics {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 8px;
   padding: 10px 0;
-  border-top: 1px solid var(--color-border);
-  border-bottom: 1px solid var(--color-border);
-  margin-bottom: 8px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 9px;
 }
 
 .metric {
@@ -206,21 +471,19 @@ header h1 {
 }
 
 .metric-label {
-  font-size: 0.7em;
-  color: var(--color-text-muted);
+  font-size: 0.68em;
+  color: var(--text-faint);
 }
 
 .metric-value {
-  font-size: 0.95em;
-  font-weight: bold;
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  font-weight: 700;
 }
 
-.positive { color: var(--color-buy); }
-.negative { color: var(--color-sell); }
-
 .rank-card-summary {
-  font-size: 0.85em;
-  color: var(--color-text);
+  font-size: 0.83em;
+  color: var(--text-muted);
   margin: 0 0 8px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -229,36 +492,143 @@ header h1 {
 }
 
 .meta-line {
+  font-size: 0.7em;
+  color: var(--text-faint);
+}
+
+/* ---- 保有銘柄カード ---- */
+
+.holding-card {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 10px;
+}
+
+.holding-card:hover {
+  border-color: var(--border-strong);
+}
+
+.holding-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.holding-card-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.holding-pnl {
+  text-align: right;
+  flex: 0 0 auto;
+}
+
+.holding-pnl-value {
+  font-family: var(--font-mono);
+  font-size: 1.15em;
+  font-weight: 700;
+}
+
+.holding-pnl-pct {
+  font-family: var(--font-mono);
+  font-size: 0.78em;
+}
+
+.holding-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+
+.holding-action-hint {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.action-hint-sell { color: var(--sell); font-weight: 700; }
+.action-hint-hold { color: var(--hold); font-weight: 700; }
+.action-hint-buy { color: var(--buy); font-weight: 700; }
+
+/* ---- 売買履歴カード ---- */
+
+.trade-card {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 13px 15px;
+  margin-bottom: 8px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.trade-type-flag {
+  font-family: var(--font-mono);
   font-size: 0.72em;
-  color: var(--color-text-muted);
+  font-weight: 700;
+  padding: 4px 9px;
+  border-radius: var(--radius-sm);
+  text-align: center;
 }
 
-footer {
-  margin-top: 32px;
-  font-size: 0.75em;
-  color: var(--color-text-muted);
-  border-top: 1px solid var(--color-border);
-  padding-top: 8px;
+.trade-type-flag.buy { color: var(--buy); background: var(--buy-bg); }
+.trade-type-flag.sell { color: var(--sell); background: var(--sell-bg); }
+
+.trade-card-main {
+  min-width: 0;
 }
 
-/* ---- モバイル ---- */
-@media (max-width: 480px) {
-  .ranking-grid {
-    grid-template-columns: 1fr;
-  }
-  .rank-card-metrics {
-    grid-template-columns: repeat(3, 1fr);
-    gap: 4px;
-  }
-  .metric-value {
-    font-size: 0.85em;
-  }
-  .detail-metrics {
-    grid-template-columns: repeat(2, 1fr) !important;
-  }
+.trade-card-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 3px;
 }
 
-/* ---- 銘柄詳細画面 ---- */
+.trade-card-sub {
+  font-size: 0.78em;
+  color: var(--text-muted);
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.trade-card-pnl {
+  text-align: right;
+  flex: 0 0 auto;
+}
+
+.trade-card-pnl-value {
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.trade-card-pnl-label {
+  font-size: 0.68em;
+  color: var(--text-faint);
+}
+
+/* ---- 詳細画面 ---- */
 
 .detail-header {
   display: flex;
@@ -268,54 +638,42 @@ footer {
   margin-bottom: 4px;
 }
 
-.detail-header .stock-code {
-  font-size: 0.85em;
-  color: var(--color-text-muted);
-}
-
 .detail-header .stock-name {
-  margin: 0;
   font-size: 1.3em;
 }
 
 .market-tag {
-  font-size: 0.75em;
-  color: var(--color-text-muted);
-  background: #eef0f3;
+  font-size: 0.72em;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 999px;
   padding: 2px 10px;
 }
 
 .current-price-line {
   font-size: 1em;
-  margin-bottom: 20px;
+  margin-bottom: 22px;
+  color: var(--text-muted);
 }
 
 .current-price-line strong {
-  font-size: 1.3em;
+  font-family: var(--font-mono);
+  font-size: 1.35em;
+  color: var(--text);
 }
 
 .detail-subhead {
   font-size: 1em;
-  margin: 20px 0 10px;
+  font-weight: 700;
+  margin: 24px 0 10px;
   padding-bottom: 6px;
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--border);
 }
-
-.no-data {
-  color: var(--color-text-muted);
-  font-size: 0.9em;
-  background: var(--color-surface);
-  border: 1px dashed var(--color-border);
-  border-radius: var(--radius);
-  padding: 14px;
-}
-
-/* ---- 株価チャート(SVG) ---- */
 
 .chart-wrap {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 10px 4px 8px;
 }
@@ -327,126 +685,94 @@ footer {
 }
 
 .chart-gridline {
-  stroke: var(--color-border);
+  stroke: var(--border);
   stroke-width: 1;
 }
 
 .chart-axis-label {
+  font-family: var(--font-mono);
   font-size: 10px;
-  fill: var(--color-text-muted);
+  fill: var(--text-faint);
 }
 
 .chart-line {
-  stroke: var(--color-hold);
+  stroke: var(--hold);
   stroke-width: 2;
 }
 
-.price-chart.positive .chart-line { stroke: var(--color-buy); }
-.price-chart.negative .chart-line { stroke: var(--color-sell); }
+.price-chart.positive .chart-line { stroke: var(--buy); }
+.price-chart.negative .chart-line { stroke: var(--sell); }
 
-.chart-last-point {
-  fill: currentColor;
-}
-.price-chart.positive .chart-last-point { fill: var(--color-buy); }
-.price-chart.negative .chart-last-point { fill: var(--color-sell); }
+.chart-last-point { fill: currentColor; }
+.price-chart.positive .chart-last-point { fill: var(--buy); }
+.price-chart.negative .chart-last-point { fill: var(--sell); }
 
 .chart-range-note {
   font-size: 0.72em;
-  color: var(--color-text-muted);
+  color: var(--text-faint);
   text-align: center;
   padding: 2px 0 4px;
 }
 
-/* ---- AI評価ブロック ---- */
-
 .eval-block {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px;
+  padding: 18px;
 }
 
 .eval-top {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
 }
 
 .eval-top .ai-score {
   margin-left: auto;
-  font-size: 1.4em;
-  font-weight: bold;
+  font-size: 1.5em;
 }
 
 .detail-metrics {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 12px;
-  padding: 12px 0;
-  border-top: 1px solid var(--color-border);
-  border-bottom: 1px solid var(--color-border);
-  margin-bottom: 12px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
 }
 
 .eval-summary {
   font-size: 0.95em;
-  margin: 0 0 8px;
+  margin: 0 0 10px;
+  color: var(--text);
 }
 
 .eval-reasoning {
   font-size: 0.85em;
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   margin-bottom: 8px;
 }
 
 .eval-reasoning summary {
   cursor: pointer;
-  color: var(--color-text);
-  font-weight: bold;
+  color: var(--text);
+  font-weight: 600;
 }
 
 .eval-reasoning p {
   margin: 8px 0 0;
 }
 
-/* ---- ナビゲーション ---- */
-
-.main-nav {
-  display: flex;
-  gap: 6px;
-  margin: 8px 0;
-}
-
-.nav-link {
-  font-size: 0.85em;
-  padding: 6px 12px;
-  border-radius: 6px;
-  text-decoration: none;
-  color: var(--color-text);
-  background: #eef0f3;
-}
-
-.nav-link:hover {
-  background: #e2e4e8;
-}
-
-/* ---- 保有銘柄: 評価損益ライン ---- */
-
-.pnl-line {
-  font-size: 0.9em;
-  font-weight: bold;
-  padding-top: 6px;
-}
-
 /* ---- 売買登録フォーム ---- */
 
 .trade-form {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px;
-  margin-bottom: 28px;
+  padding: 18px;
+  margin-bottom: 32px;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px 16px;
@@ -456,38 +782,35 @@ footer {
 .form-row {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
 }
 
 .form-row label {
-  font-size: 0.78em;
-  color: var(--color-text-muted);
+  font-size: 0.76em;
+  color: var(--text-muted);
 }
 
 .form-row input,
 .form-row select {
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  padding: 7px 8px;
+  font-family: var(--font-ui);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 9px 10px;
   font-size: 0.95em;
+}
+
+.form-row input:focus,
+.form-row select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .trade-form button[type="submit"] {
   grid-column: 1 / -1;
-  padding: 10px;
-  border: none;
-  border-radius: 8px;
-  background: #1a1a1a;
-  color: #fff;
-  font-weight: bold;
-  cursor: pointer;
   justify-self: start;
   min-width: 140px;
-}
-
-.trade-form button[type="submit"]:disabled {
-  opacity: 0.6;
-  cursor: default;
 }
 
 .form-message {
@@ -496,54 +819,113 @@ footer {
   font-size: 0.85em;
 }
 
-.form-message-success { color: var(--color-buy); }
-.form-message-error { color: var(--color-sell); }
+.form-message-success { color: var(--buy); }
+.form-message-error { color: var(--sell); }
 
-/* ---- 売買履歴テーブル ---- */
+/* ---- フッター・下部ナビ ---- */
 
-.trades-table {
-  width: 100%;
-  border-collapse: collapse;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  font-size: 0.88em;
+.app-footer {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 20px 88px;
+  font-size: 0.74em;
+  color: var(--text-faint);
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
 }
 
-.trades-table th,
-.trades-table td {
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--color-border);
-  text-align: left;
-  vertical-align: top;
+.bottom-nav {
+  display: none;
 }
 
-.trades-table th {
-  background: #f0f1f3;
-  font-size: 0.85em;
-  color: var(--color-text-muted);
+/* ---- レスポンシブ ---- */
+
+@media (max-width: 860px) {
+  .top-nav {
+    display: none;
+  }
+  .header-meta {
+    display: none;
+  }
+  .app-header-inner {
+    padding: 12px 16px;
+  }
+  .app-main {
+    padding: 16px 14px 24px;
+  }
+
+  .bottom-nav {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 20;
+    background: rgba(15, 20, 26, 0.96);
+    backdrop-filter: blur(10px);
+    border-top: 1px solid var(--border);
+    padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .bottom-nav-link {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    text-decoration: none;
+    color: var(--text-faint);
+    font-size: 0.68em;
+    padding: 6px 2px;
+    border-radius: var(--radius-sm);
+  }
+
+  .bottom-nav-link.active {
+    color: var(--accent);
+  }
+
+  .bottom-nav-icon {
+    font-size: 1.2em;
+  }
+
+  .app-footer {
+    padding-bottom: 96px;
+  }
+
+  .card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .rank-card-metrics,
+  .detail-metrics {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+  }
+
+  .holding-metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .trade-card {
+    grid-template-columns: auto 1fr;
+    row-gap: 8px;
+  }
+
+  .trade-card-pnl {
+    grid-column: 1 / -1;
+    text-align: left;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .stats-strip {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 
-.trades-table tr:last-child td {
-  border-bottom: none;
-}
-
-.trade-type {
-  display: inline-block;
-  font-size: 0.85em;
-  font-weight: bold;
-  padding: 2px 8px;
-  border-radius: 999px;
-}
-
-.trade-type-buy { color: var(--color-buy); background: var(--color-buy-bg); }
-.trade-type-sell { color: var(--color-sell); background: var(--color-sell-bg); }
-
-@media (max-width: 700px) {
-  .trades-table {
-    display: block;
-    overflow-x: auto;
-    white-space: nowrap;
+@media (max-width: 420px) {
+  .holding-metrics {
+    grid-template-columns: repeat(2, 1fr);
   }
 }

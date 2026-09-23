@@ -4,54 +4,84 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>日本株AI短期売買分析ツール</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header>
-    <h1>日本株AI短期売買分析ツール</h1>
-    <nav class="main-nav">
-      <a href="#/" class="nav-link">ランキング</a>
-      <a href="#/holdings" class="nav-link">保有銘柄</a>
-      <a href="#/trades" class="nav-link">売買履歴</a>
-    </nav>
-    <p id="meta-info" class="meta-info">読み込み中...</p>
-    <p class="disclaimer">
-      本サイトの評価はAIによる参考情報です。表示されるスコア・期待リターン・リスクは
-      統計的に校正された確率ではなく、AIによる定性的な評価値です。このツールは自動で売買を行うものではありません。
-      投資判断はご自身の責任で行ってください。投資利益を保証するものではありません。
-      売買はSBI証券等で実際に行った内容を、このツールに手動で記録するものです。
-    </p>
+  <header class="app-header">
+    <div class="app-header-inner">
+      <a href="#/" class="brand">
+        <span class="brand-mark">AI</span>
+        <span class="brand-text">日本株AI分析</span>
+      </a>
+      <nav class="top-nav" aria-label="メインナビゲーション">
+        <a href="#/" class="top-nav-link" data-route="home">ホーム</a>
+        <a href="#/ranking" class="top-nav-link" data-route="ranking">ランキング</a>
+        <a href="#/holdings" class="top-nav-link" data-route="holdings">保有銘柄</a>
+        <a href="#/trades" class="top-nav-link" data-route="trades">売買履歴</a>
+      </nav>
+      <div class="header-meta">
+        <span id="meta-info">読み込み中...</span>
+      </div>
+    </div>
   </header>
 
-  <main>
-    <!-- ランキング画面 -->
-    <section id="view-ranking" class="view">
+  <main class="app-main">
+    <p class="disclaimer">
+      本サイトの評価はAIによる参考情報です。表示されるスコア・期待リターン・リスクは統計的に校正された確率ではなく、AIによる定性的な評価値です。
+      このツールは自動で売買を行いません。売買はSBI証券等で実際に行った内容を手動で記録するものです。投資判断はご自身の責任で行ってください。
+    </p>
+
+    <!-- ホーム -->
+    <section id="view-home" class="view">
+      <div id="home-alert-zone" aria-live="polite"></div>
+      <div id="home-stats" class="stats-strip"></div>
+
       <div class="section-head">
-        <h2>AI評価ランキング</h2>
-        <button id="ranking-reload" class="reload-button" title="再読み込み">更新</button>
+        <h2>注目のBUY候補</h2>
+        <a href="#/ranking" class="text-link">ランキングを見る →</a>
       </div>
-      <div id="ranking-list" class="ranking-grid" aria-live="polite">読み込み中...</div>
+      <div id="home-ranking-preview" class="card-grid" aria-live="polite">読み込み中...</div>
+
+      <div class="section-head">
+        <h2>保有銘柄</h2>
+        <a href="#/holdings" class="text-link">すべて見る →</a>
+      </div>
+      <div id="home-holdings-preview" class="card-grid" aria-live="polite">読み込み中...</div>
     </section>
 
-    <!-- 銘柄詳細画面 -->
+    <!-- ランキング -->
+    <section id="view-ranking" class="view" hidden>
+      <div class="section-head">
+        <h2>AI評価ランキング</h2>
+        <button id="ranking-reload" class="ghost-button" title="再読み込み">更新</button>
+      </div>
+      <p class="section-note">保有中の銘柄は除外しています。BUY優先・低リスク優先・期待リターン優先の順で並んでいます。</p>
+      <div id="ranking-list" class="card-grid" aria-live="polite">読み込み中...</div>
+    </section>
+
+    <!-- 銘柄詳細 -->
     <section id="view-detail" class="view" hidden>
-      <button id="back-to-ranking" class="back-button">← ランキングに戻る</button>
+      <button id="back-to-ranking" class="ghost-button back-button">← 戻る</button>
       <div id="detail-content" aria-live="polite">読み込み中...</div>
     </section>
 
-    <!-- 保有銘柄画面 -->
+    <!-- 保有銘柄 -->
     <section id="view-holdings" class="view" hidden>
       <div class="section-head">
         <h2>保有銘柄</h2>
-        <button id="holdings-reload" class="reload-button" title="再読み込み">更新</button>
+        <button id="holdings-reload" class="ghost-button" title="再読み込み">更新</button>
       </div>
+      <p class="section-note">取得日時が新しい順に表示しています。</p>
       <div id="holdings-list" aria-live="polite">読み込み中...</div>
     </section>
 
-    <!-- 売買履歴画面（BUY/SELL登録フォーム込み） -->
+    <!-- 売買履歴 -->
     <section id="view-trades" class="view" hidden>
       <div class="section-head">
-        <h2>売買記録を登録</h2>
+        <h2>売買を記録</h2>
       </div>
       <form id="trade-form" class="trade-form">
         <div class="form-row">
@@ -81,24 +111,39 @@
           <label for="trade-memo">メモ（任意）</label>
           <input type="text" id="trade-memo" placeholder="例: 決算通過を確認して購入" />
         </div>
-        <button type="submit" id="trade-submit">登録する</button>
+        <button type="submit" id="trade-submit" class="primary-button">登録する</button>
         <p id="trade-form-message" class="form-message" role="alert"></p>
       </form>
 
       <div class="section-head">
         <h2>売買履歴</h2>
-        <button id="trades-reload" class="reload-button" title="再読み込み">更新</button>
+        <button id="trades-reload" class="ghost-button" title="再読み込み">更新</button>
       </div>
       <div id="trades-list" aria-live="polite">読み込み中...</div>
     </section>
   </main>
 
-  <footer>
+  <footer class="app-footer">
     <p>
-      表示されているデータは、実際に取得可能だった時点（データ基準日 / dataAsOf）の情報です。
+      表示されているデータは、実際に取得可能だった時点（データ基準日）の情報です。
       J-Quants Freeプランの仕様上、常に実行日から約3ヶ月前までのデータとなります。
     </p>
   </footer>
+
+  <nav class="bottom-nav" aria-label="メインナビゲーション（モバイル）">
+    <a href="#/" class="bottom-nav-link" data-route="home">
+      <span class="bottom-nav-icon">⌂</span><span>ホーム</span>
+    </a>
+    <a href="#/ranking" class="bottom-nav-link" data-route="ranking">
+      <span class="bottom-nav-icon">≡</span><span>ランキング</span>
+    </a>
+    <a href="#/holdings" class="bottom-nav-link" data-route="holdings">
+      <span class="bottom-nav-icon">◈</span><span>保有銘柄</span>
+    </a>
+    <a href="#/trades" class="bottom-nav-link" data-route="trades">
+      <span class="bottom-nav-icon">✎</span><span>履歴</span>
+    </a>
+  </nav>
 
   <script src="app.js"></script>
 </body>
