@@ -40,6 +40,7 @@
 
 html {
   scroll-padding-top: 72px;
+  overflow-x: hidden;
 }
 
 body {
@@ -49,6 +50,8 @@ body {
   color: var(--text);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+  max-width: 100vw;
 }
 
 a {
@@ -316,6 +319,8 @@ a {
 .alert-reason {
   font-size: 0.85em;
   color: var(--text-muted);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .alert-calm {
@@ -371,10 +376,17 @@ a {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
   gap: 12px;
+  /* Gridアイテムは既定でmin-width:autoのため、子要素に長い改行不可能なテキストが
+     含まれると、このグリッド自体がビューポート幅を超えて広がり、
+     モバイルブラウザがページ全体を縮小表示してしまうことがある。
+     グリッド自身をmin-width:0にしても子アイテム側の既定値には影響しないため、
+     子アイテム(.rank-card等)側に個別でmin-width:0を指定して対処する。 */
+  min-width: 0;
 }
 
 .rank-card {
   display: block;
+  min-width: 0; /* Gridアイテムの既定min-width:autoによる横方向オーバーフロー対策 */
   text-decoration: none;
   color: inherit;
   background: var(--surface);
@@ -485,6 +497,8 @@ a {
   font-size: 0.83em;
   color: var(--text-muted);
   margin: 0 0 8px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -500,6 +514,7 @@ a {
 
 .holding-card {
   display: block;
+  min-width: 0; /* Gridアイテムの既定min-width:autoによる横方向オーバーフロー対策(ホームのプレビューではcard-grid内に配置される) */
   text-decoration: none;
   color: inherit;
   background: var(--surface);
@@ -747,6 +762,8 @@ a {
   font-size: 0.95em;
   margin: 0 0 10px;
   color: var(--text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .eval-reasoning {

@@ -559,6 +559,21 @@ async function loadTrades() {
   }
 }
 
+/**
+ * 購入日・売却日の入力欄を初期化する。
+ * - 初期値を「本日」にする
+ * - max属性を「本日」にし、未来日を選択できないようにする
+ * input type="date" の .value は常に YYYY-MM-DD 形式であり、
+ * これは既存のAPI(transactionDate)にそのまま渡している形式と同じなので、
+ * ここでの変更によってバックエンドへ渡すデータ形式は変わらない。
+ */
+function initTradeDateField() {
+  const todayStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const dateInput = document.getElementById("trade-date");
+  dateInput.max = todayStr;
+  dateInput.value = todayStr;
+}
+
 async function submitTradeForm(e) {
   e.preventDefault();
   const messageEl = document.getElementById("trade-form-message");
@@ -589,6 +604,7 @@ async function submitTradeForm(e) {
     messageEl.textContent = "登録しました。";
     messageEl.classList.add("form-message-success");
     document.getElementById("trade-form").reset();
+    initTradeDateField(); // reset()でmax以外は消えるため、本日の日付を再設定する
     cachedLatestBuyDateByCode = null; // 保有日時キャッシュを無効化
     loadTrades();
   } catch {
@@ -629,6 +645,7 @@ function handleRoute() {
   } else if (hash === "#/trades") {
     showView("trades");
     setActiveNav("trades");
+    initTradeDateField();
     loadTrades();
   } else {
     showView("home");
