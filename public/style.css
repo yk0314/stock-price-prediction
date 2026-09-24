@@ -538,9 +538,20 @@ a {
 
 .holding-card-badges {
   display: flex;
+  align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: space-between;
+}
+
+.holding-badge-group {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.holding-acquired-date {
+  white-space: nowrap;
 }
 
 .holding-pnl {

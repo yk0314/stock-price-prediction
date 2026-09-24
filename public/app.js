@@ -209,9 +209,10 @@ async function loadHome() {
       ? displayRanking.map((item, i) => renderRankingCard(item, i + 1)).join("")
       : `<div class="no-data">現在、購入候補となる評価結果がありません。</div>`;
 
-    const sortedHoldings = sortHoldingsByAcquisitionDesc(holdings, await getLatestBuyDateByCode());
+    const dateByCode = await getLatestBuyDateByCode();
+    const sortedHoldings = sortHoldingsByAcquisitionDesc(holdings, dateByCode);
     holdingsPreviewEl.innerHTML = sortedHoldings.length
-      ? sortedHoldings.slice(0, 3).map(renderHoldingCard).join("")
+      ? sortedHoldings.slice(0, 3).map((h) => renderHoldingCard(h, dateByCode.get(h.code))).join("")
       : `<div class="no-data">保有銘柄がありません。</div>`;
   } catch (err) {
     document.getElementById("home-alert-zone").innerHTML = `<div class="no-data">データを取得できませんでした。</div>`;
@@ -461,7 +462,7 @@ function sortHoldingsByAcquisitionDesc(holdings, latestBuyDateByCode) {
   });
 }
 
-function renderHoldingCard(h) {
+function renderHoldingCard(h, acquisitionDate) {
   const judgement = judgeHoldingAttention(h);
   return `
     <a class="holding-card" href="#/stock/${encodeURIComponent(h.code)}">
@@ -478,8 +479,11 @@ function renderHoldingCard(h) {
         </div>
       </div>
       <div class="holding-card-badges">
-        ${h.latestEvaluation ? ratingBadge(h.latestEvaluation.rating) : ""}
-        ${h.latestEvaluation ? riskBadge(h.latestEvaluation.risk) : ""}
+        <span class="meta-line holding-acquired-date">取得日: ${acquisitionDate ?? "-"}</span>
+        <span class="holding-badge-group">
+          ${h.latestEvaluation ? ratingBadge(h.latestEvaluation.rating) : ""}
+          ${h.latestEvaluation ? riskBadge(h.latestEvaluation.risk) : ""}
+        </span>
       </div>
       <div class="holding-metrics">
         <div class="metric">
@@ -514,7 +518,9 @@ async function loadHoldings() {
   try {
     const [holdings, latestBuyDateByCode] = await Promise.all([fetchJson("/api/holdings"), getLatestBuyDateByCode()]);
     const sorted = sortHoldingsByAcquisitionDesc(holdings, latestBuyDateByCode);
-    el.innerHTML = sorted.length ? sorted.map(renderHoldingCard).join("") : `<div class="no-data">現在保有中の銘柄はありません。</div>`;
+    el.innerHTML = sorted.length
+      ? sorted.map((h) => renderHoldingCard(h, latestBuyDateByCode.get(h.code))).join("")
+      : `<div class="no-data">現在保有中の銘柄はありません。</div>`;
   } catch {
     el.innerHTML = `<div class="no-data">保有銘柄を取得できませんでした。</div>`;
   }
