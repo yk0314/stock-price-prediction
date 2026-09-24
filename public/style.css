@@ -824,6 +824,19 @@ a {
   outline-offset: 1px;
 }
 
+/* ダーク背景だとブラウザ既定のカレンダーアイコンが黒っぽく表示され見えなくなるため、
+   明るく反転させて視認・クリックできるようにする(Chrome/Edge等のChromium系ブラウザ向け)。
+   Firefoxはinput[type=date]の描画が異なりこのpseudo-elementを持たないため影響しない。 */
+.form-row input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.85);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.form-row input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  background: var(--surface-raised);
+}
+
 .trade-form button[type="submit"] {
   grid-column: 1 / -1;
   justify-self: start;

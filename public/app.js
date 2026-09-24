@@ -572,6 +572,21 @@ function initTradeDateField() {
   const dateInput = document.getElementById("trade-date");
   dateInput.max = todayStr;
   dateInput.value = todayStr;
+
+  // アイコン部分以外をクリックした場合でもカレンダーが開くようにする(対応ブラウザのみ)。
+  // showPicker()未対応のブラウザでは何もせず、ネイティブの通常挙動(セグメント編集)のままになる。
+  if (!dateInput.dataset.pickerBound) {
+    dateInput.addEventListener("click", () => {
+      if (typeof dateInput.showPicker === "function") {
+        try {
+          dateInput.showPicker();
+        } catch {
+          // 既に開いている場合など、失敗しても無視する
+        }
+      }
+    });
+    dateInput.dataset.pickerBound = "true";
+  }
 }
 
 async function submitTradeForm(e) {
