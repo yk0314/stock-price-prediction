@@ -93,6 +93,8 @@ export const config = {
   },
 
   // --- Gemini API 設定 ---
+  // 1リクエスト=1銘柄が絶対条件（複数銘柄を同一コンテキストに混ぜない）。
+  // 以下の値はすべて環境変数で上書きできる。環境変数が無ければデフォルト値を使う。
   GEMINI: {
     // 明示的なモデル名を指定する（エイリアスは将来的な仕様変更で挙動が変わる可能性があるため避ける）。
     // 2026年9月時点でGA(正式提供)されている無料利用可能なFlash系モデル。
@@ -101,17 +103,32 @@ export const config = {
     // このモデルの無料枠(RPM/RPD/TPM)を必ず確認すること。
     model: "gemini-3.5-flash",
 
-    // スクリーニングプール(poolSize件)の中から、実際にGeminiへ渡す件数。
-    // 初期テストでは10件程度に抑える。将来的に無料枠の実測を見ながら拡大する。
-    candidateCount: 10,
+    // スクリーニングプール(poolSize件、最大150)の中から、実際にGeminiへ渡す件数。
+    // GEMINI_MAX_STOCKS で上書き可能（例: 150を指定すればプール全件を1銘柄ずつ分析する）。
+    candidateCount: Number(process.env.GEMINI_MAX_STOCKS) || 10,
 
     // Gemini呼び出し1回あたりのタイムアウト(ms)
     timeoutMs: 30000,
 
-    // 429 (quota exceeded) が発生した場合、リトライは一切行わない（課金リトライ・モデル切替は禁止）。
-    // この設定値は将来的な一時的ネットワークエラー用の再試行回数の上限であり、
-    // 429/RESOURCE_EXHAUSTED系のエラーには適用しない（gemini.js側で明示的に分岐している）。
+    // 過去の設定値（後方互換のため残置。現在は下のmaxRetriesがリトライ回数を制御する）。
     maxRetriesOnTransientError: 0,
+
+    // 1銘柄処理後、次の銘柄に移るまでの待機時間(ms)。GEMINI_REQUEST_INTERVAL_MS で上書き可能。
+    // Gemini Free Tierでの安全運用のため、既定は30秒間隔。
+    requestIntervalMs: Number(process.env.GEMINI_REQUEST_INTERVAL_MS) || 30000,
+
+    // 429(Too Many Requests)・503(Service Unavailable)等の一時的エラー発生時のリトライ上限回数。
+    // GEMINI_MAX_RETRIES で上書き可能。0にすればリトライ無し(従来の挙動)。無限リトライはしない。
+    maxRetries: Number(process.env.GEMINI_MAX_RETRIES) || 2,
+
+    // リトライ時の基本バックオフ時間(ms)。実際の待機時間は 試行回数 に応じて指数的に増える
+    // （かつAPIレスポンスにRetry-Afterが含まれていればそちらを優先する）。
+    retryBackoffBaseMs: Number(process.env.GEMINI_RETRY_BACKOFF_BASE_MS) || 15000,
+
+    // 1回のパイプライン実行あたりのGemini APIリクエスト上限（通常分析+リトライの合計）。
+    // GEMINI_DAILY_REQUEST_LIMIT で上書き可能。上限に達したら、その回の残り銘柄の分析は
+    // 安全側にスキップして処理を打ち切る（パイプライン自体は継続する）。
+    dailyRequestLimit: Number(process.env.GEMINI_DAILY_REQUEST_LIMIT) || 200,
   },
 
   // --- 最終ランキングに残す銘柄数 ---

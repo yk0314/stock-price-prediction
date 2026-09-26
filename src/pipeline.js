@@ -6,13 +6,13 @@ import { computeFeaturesForAll } from "./features.js";
 import { screenToPool, selectGeminiCandidates } from "./screening.js";
 import { analyzeCandidates } from "./gemini.js";
 import { CloudflareKV, saveResultsToKV } from "./kv.js";
-import { saveToD1 } from "./pipelineD1.js";
+import { saveToD1, saveEvaluationIncremental } from "./pipelineD1.js";
 import { writeArtifact } from "./artifacts.js";
 import { fetchTopixForRange, computeMarketFeatures, computeRelativeStrength } from "./market.js";
 import { buildAvailableFinancialsByCode } from "./financials.js";
 import { buildListedInfoByCode } from "./listedInfo.js";
 import { D1Client } from "./d1.js";
-import { fetchHeldCodes } from "./d1Repository.js";
+import { fetchHeldCodes, logErrorToD1 } from "./d1Repository.js";
 
 function addDaysUTC(dateStr, days) {
   const d = new Date(dateStr + "T00:00:00Z");
@@ -195,15 +195,22 @@ async function main() {
   // （他のAPI取得失敗時と同じ「補助的な処理は失敗してもパイプライン全体を止めない」方針を踏襲）。
   const normalCandidateCodes = new Set(geminiCandidates.map((c) => c.code));
   const featureByCode = new Map(featureList.map((f) => [f.code, f]));
-  let heldExtraCandidates = [];
-  if (process.env.CF_D1_DATABASE_ID) {
-    try {
-      const heldD1 = new D1Client({
+
+  // D1クライアントはここで1つだけ生成し、保有銘柄の取得・Gemini結果の即時保存・
+  // エラーログ記録の3箇所で使い回す（Stage 8のsaveToD1は従来通り独自にクライアントを生成する。
+  // stocks/stock_prices/financialsの一括保存はそのままで問題ないため、そこは変更しない）。
+  const d1 = process.env.CF_D1_DATABASE_ID
+    ? new D1Client({
         accountId: process.env.CF_ACCOUNT_ID,
         databaseId: process.env.CF_D1_DATABASE_ID,
         apiToken: process.env.CF_API_TOKEN,
-      });
-      const heldCodes = await fetchHeldCodes(heldD1);
+      })
+    : null;
+
+  let heldExtraCandidates = [];
+  if (d1) {
+    try {
+      const heldCodes = await fetchHeldCodes(d1);
       const selection = selectHeldExtraCandidates(heldCodes, normalCandidateCodes, featureByCode);
       heldExtraCandidates = selection.heldExtraCandidates;
       console.log(
@@ -255,13 +262,58 @@ async function main() {
   }
   for (const candidate of combinedCandidates) {
     candidate.financials = financialsByCode.get(candidate.code) ?? null;
+    // Geminiプロンプトに企業名を渡し、出力される企業名との突き合わせ(明らかな矛盾の検知)に使う。
+    // 取得できていない場合はnullのままでよい(gemini.js側はnameが無ければ突き合わせをスキップする)。
+    candidate.name = listedInfoByCode.get(candidate.code)?.name ?? null;
   }
 
-  // --- Stage 5: gemini — AI分析（通常候補+保有銘柄追加分。無料枠超過時は自動スキップ・リトライなし） ---
+  // --- Stage 5: gemini — AI分析（通常候補+保有銘柄追加分。1リクエスト=1銘柄。429/503は設定回数までリトライ） ---
+  // 1銘柄成功するたびにD1のai_evaluationsへ即時保存する（150銘柄分をメモリに貯めてから
+  // 最後に一括保存すると、GitHub Actionsが途中で停止した際にそれまでの成功分が全て失われるため）。
+  // metaForEval は Stage 7 で組み立てる本物の meta より前に必要なため、ここでは
+  // buildEvaluationRecord()が実際に使うフィールド(predictionExecutedAt/cutoffDate)だけを持つ
+  // 最小限のオブジェクトとして渡す。
+  const metaForEval = { predictionExecutedAt, cutoffDate };
+  let aiEvaluationsSavedCount = 0;
+  const savedEvaluationIds = [];
+  const aiEvaluationFailures = [];
+
   const analysisResults = await analyzeCandidates(
     process.env.GEMINI_API_KEY,
     combinedCandidates,
-    { cutoffDate, predictionExecutedAt }
+    { cutoffDate, predictionExecutedAt },
+    {
+      onCandidateComplete: async (outcome) => {
+        if (!d1) return; // D1未接続時は即時保存もエラーログ記録もできないため何もしない
+        if (outcome.success) {
+          try {
+            const id = await saveEvaluationIncremental(d1, metaForEval, outcome.result, heldExtraCodes);
+            savedEvaluationIds.push(id);
+            aiEvaluationsSavedCount++;
+          } catch (err) {
+            console.warn(`[pipeline] D1: ai_evaluations即時保存に失敗 code=${outcome.code}: ${err.message}`);
+            aiEvaluationFailures.push({ code: outcome.code, error: err.message });
+          }
+        } else {
+          try {
+            await logErrorToD1(d1, {
+              source: "gemini",
+              errorType: outcome.lastError?.status ? `http_${outcome.lastError.status}` : "analysis_failed",
+              message: outcome.lastError?.message ?? outcome.validationErrors.join(" / ") ?? "unknown error",
+              context: {
+                code: outcome.code,
+                attempts: outcome.attempts,
+                statusCounts: outcome.statusCounts,
+                validationErrors: outcome.validationErrors,
+              },
+            });
+          } catch (err) {
+            // エラーログの記録自体が失敗しても、パイプライン全体は継続する
+            console.warn(`[pipeline] D1: error_logsへの記録に失敗 code=${outcome.code}: ${err.message}`);
+          }
+        }
+      },
+    }
   );
   apiErrorCounts.gemini429OrError = combinedCandidates.length - analysisResults.length;
   console.log(
@@ -363,9 +415,17 @@ async function main() {
     stocks: stocksForD1,
     pricesByCode: pricesByCodeForD1,
     financialsByCode,
-    analysisResults,
-    heldExtraCodes,
   });
+
+  // ai_evaluationsはStage 5で1銘柄ずつ即時保存済みのため、ここでは
+  // その集計結果をsaveToD1()の戻り値(stocks/stock_prices/financialsのみ)にマージするだけでよい。
+  d1Summary.aiEvaluations = aiEvaluationsSavedCount;
+  d1Summary.savedEvaluationIds = savedEvaluationIds;
+  if (aiEvaluationFailures.length > 0) {
+    d1Summary.failures.push(
+      ...aiEvaluationFailures.map((f) => ({ stage: "ai_evaluations", code: f.code, error: f.error }))
+    );
+  }
 
   console.log(
     `[pipeline] 完了。処理時間: ${(processingTimeMs / 1000 / 60).toFixed(1)}分`

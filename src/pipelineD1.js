@@ -3,22 +3,72 @@ import {
   saveStocksToD1,
   saveStockPricesToD1,
   saveFinancialsToD1,
-  saveAiEvaluationsToD1,
+  saveAiEvaluationToD1,
 } from "./d1Repository.js";
 
 /**
- * パイプラインの結果をD1へ保存する。
- * 各テーブルの保存は独立してtry/catchし、1つが失敗しても他の保存は継続する。
- * @returns {Promise<object>} 保存件数と失敗内容のサマリー
+ * Gemini分析結果1件を、D1保存用のai_evaluationsレコード形式に変換する。
+ * evaluation_date: AIが評価を行った日（実行日）
+ * data_as_of_date: 評価に使った市場データの基準日（cutoffDate）
+ * generated_at:    実際に評価を生成した日時
+ * 保有銘柄の再評価で追加された銘柄(通常のスクリーニング候補ではない)はsource="holding"、
+ * それ以外(通常候補。保有中かどうかは問わない)は従来通りsource="pipeline"で区別する。
  */
-export async function saveToD1(meta, { stocks, pricesByCode, financialsByCode, analysisResults, heldExtraCodes }) {
+export function buildEvaluationRecord(meta, r, heldExtraCodes) {
+  const evaluationDate = meta.predictionExecutedAt.slice(0, 10);
+  return {
+    code: r.code,
+    evaluationDate,
+    dataAsOfDate: r.dataAsOf ?? meta.cutoffDate,
+    generatedAt: meta.predictionExecutedAt,
+    score: r.score ?? null,
+    rating: r.rating ?? null,
+    risk: r.risk ?? null,
+    upsideProbability: r.upsideProbability ?? null,
+    downsideRisk: r.downsideRisk ?? null,
+    expectedReturn: r.expectedReturn ?? null,
+    expectedHoldingDays: r.expectedHoldingDays ?? null,
+    confidence: r.confidence ?? null,
+    reasoning: r.reasoning ?? null,
+    summary: r.summary ?? null,
+    positiveFactors: r.positiveFactors ?? [],
+    negativeFactors: r.negativeFactors ?? [],
+    usedFeatures: r.usedFeatures ?? {},
+    source: heldExtraCodes?.has(r.code) ? "holding" : "pipeline",
+    priceAtEvaluation: r.price ?? null,
+  };
+}
+
+/**
+ * Gemini分析が1銘柄成功するたびに、その場でD1のai_evaluationsへ保存する（追記専用・常にINSERT）。
+ * 150銘柄すべての分析が終わるまでメモリ上だけに結果を貯めておく設計は避け、
+ * 1件ごとに確定的にD1へ書き込むことで、GitHub Actionsが途中で停止しても
+ * そこまで成功した分析結果が失われないようにする。
+ * @returns {Promise<number>} 保存されたレコードのid
+ */
+export async function saveEvaluationIncremental(d1, meta, analysisResult, heldExtraCodes) {
+  const record = buildEvaluationRecord(meta, analysisResult, heldExtraCodes);
+  return saveAiEvaluationToD1(d1, record);
+}
+
+/**
+ * パイプラインの結果(stocks/stock_prices/financials)をD1へ保存する。
+ * 各テーブルの保存は独立してtry/catchし、1つが失敗しても他の保存は継続する。
+ *
+ * 【設計変更】ai_evaluationsはこの関数ではもう保存しない。Gemini分析が1銘柄成功するたびに
+ * saveEvaluationIncremental()でその場で即時保存する方式に変更したため
+ * （150銘柄分をメモリに貯めてから最後に一括保存すると、GitHub Actions途中停止時に
+ *  それまでの成功分析が全て失われてしまうため）。呼び出し側(pipeline.js)は、
+ * 個別に集計したai_evaluationsの保存件数・失敗を、この関数が返すsummaryにマージすること。
+ *
+ * @returns {Promise<object>} 保存件数と失敗内容のサマリー（ai_evaluationsは含まない。呼び出し側でマージする）
+ */
+export async function saveToD1(meta, { stocks, pricesByCode, financialsByCode }) {
   const summary = {
     enabled: false,
     stocks: 0,
     stockPrices: 0,
     financials: 0,
-    aiEvaluations: 0,
-    savedEvaluationIds: [],
     failures: [],
   };
 
@@ -76,52 +126,8 @@ export async function saveToD1(meta, { stocks, pricesByCode, financialsByCode, a
     summary.failures.push({ stage: "financials", error: err.message });
   }
 
-  // AI評価（常にINSERT。過去の評価を上書きしない）
-  // evaluation_date: AIが評価を行った日（実行日）
-  // data_as_of_date: 評価に使った市場データの基準日（cutoffDate）
-  // generated_at:    実際に評価を生成した日時
-  try {
-    const evaluationDate = meta.predictionExecutedAt.slice(0, 10);
-    const evaluations = analysisResults.map((r) => ({
-      code: r.code,
-      evaluationDate,
-      dataAsOfDate: r.dataAsOf ?? meta.cutoffDate,
-      generatedAt: meta.predictionExecutedAt,
-      score: r.score ?? null,
-      rating: r.rating ?? null,
-      risk: r.risk ?? null,
-      upsideProbability: r.upsideProbability ?? null,
-      downsideRisk: r.downsideRisk ?? null,
-      expectedReturn: r.expectedReturn ?? null,
-      expectedHoldingDays: r.expectedHoldingDays ?? null,
-      confidence: r.confidence ?? null,
-      reasoning: r.reasoning ?? null,
-      summary: r.summary ?? null,
-      positiveFactors: r.positiveFactors ?? [],
-      negativeFactors: r.negativeFactors ?? [],
-      usedFeatures: r.usedFeatures ?? {},
-      // 保有銘柄の再評価で追加された銘柄(通常のスクリーニング候補ではない)は"holding"、
-      // それ以外(通常候補。保有中かどうかは問わない)は従来通り"pipeline"としてsourceで区別する。
-      source: heldExtraCodes?.has(r.code) ? "holding" : "pipeline",
-      priceAtEvaluation: r.price ?? null,
-    }));
-
-    const { savedIds, failures } = await saveAiEvaluationsToD1(d1, evaluations);
-    summary.aiEvaluations = savedIds.length;
-    summary.savedEvaluationIds = savedIds;
-    if (failures.length > 0) {
-      for (const f of failures) {
-        console.warn(`[pipeline] D1: ai_evaluations保存に失敗 code=${f.code}: ${f.error}`);
-        summary.failures.push({ stage: "ai_evaluations", code: f.code, error: f.error });
-      }
-    }
-  } catch (err) {
-    console.warn(`[pipeline] D1: ai_evaluations保存で予期しないエラー: ${err.message}`);
-    summary.failures.push({ stage: "ai_evaluations", error: err.message });
-  }
-
   console.log(
-    `[pipeline] D1保存完了: stocks=${summary.stocks}, stock_prices=${summary.stockPrices}, financials=${summary.financials}, ai_evaluations=${summary.aiEvaluations}, 失敗=${summary.failures.length}件`
+    `[pipeline] D1保存完了(stocks/stock_prices/financials): stocks=${summary.stocks}, stock_prices=${summary.stockPrices}, financials=${summary.financials}, 失敗=${summary.failures.length}件`
   );
   return summary;
 }

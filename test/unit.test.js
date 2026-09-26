@@ -716,22 +716,19 @@ await test("saveToD1: CF_D1_DATABASE_ID未設定ならスキップし、パイ�
     const { saveToD1 } = await import("../src/pipelineD1.js");
     const result = await saveToD1(
       { predictionExecutedAt: "2026-09-14T06:00:00Z", cutoffDate: "2026-09-13" },
-      { stocks: [], pricesByCode: new Map(), financialsByCode: new Map(), analysisResults: [] }
+      { stocks: [], pricesByCode: new Map(), financialsByCode: new Map() }
     );
     assert.equal(result.enabled, false);
-    assert.equal(result.aiEvaluations, 0);
   } finally {
     if (original) process.env.CF_D1_DATABASE_ID = original;
   }
 });
-await test("saveToD1: AI評価の3つの日付を正しく設定する", async () => {
+await test("saveToD1: stock_pricesがMapのまま正しく保存される(Map二重変換バグの回帰確認)", async () => {
   process.env.CF_ACCOUNT_ID = "acc";
   process.env.CF_D1_DATABASE_ID = "db";
   process.env.CF_API_TOKEN = "tok";
   const originalFetch = global.fetch;
-  const capturedBodies = [];
   global.fetch = async (url, opts) => {
-    capturedBodies.push(JSON.parse(opts.body));
     return new Response(
       JSON.stringify({ success: true, result: [{ results: [], meta: { last_row_id: 7 } }] }),
       { status: 200 }
@@ -745,35 +742,13 @@ await test("saveToD1: AI評価の3つの日付を正しく設定する", async (
         stocks: [{ code: "7203" }],
         pricesByCode: new Map([["7203", [{ date: "2026-09-13", close: 2800, volume: 100 }]]]),
         financialsByCode: new Map(),
-        analysisResults: [
-          {
-            code: "7203",
-            dataAsOf: "2026-09-13",
-            score: 82,
-            rating: "BUY",
-            price: 2800,
-            positiveFactors: [],
-            negativeFactors: [],
-          },
-        ],
       }
     );
     assert.equal(result.enabled, true);
-    assert.equal(result.aiEvaluations, 1);
-    assert.deepEqual(result.savedEvaluationIds, [7]);
     // 【回帰テスト】以前、pricesByCodeをMapで渡しているのにsaveToD1内部で
     // 再度Object.entries()変換していたため、常に0件保存になるバグがあった。
     // 実際に1件書き込まれることを明示的に検証する。
     assert.equal(result.stockPrices, 1, "stock_pricesが書き込まれていない(Map二重変換バグの回帰確認)");
-
-    const aiInsert = capturedBodies.find((b) => b.sql.includes("INSERT INTO ai_evaluations"));
-    assert.ok(aiInsert, "ai_evaluationsへのINSERTが実行されていない");
-    assert.equal(aiInsert.params[1], "2026-09-14"); // evaluation_date(実行日)
-    assert.equal(aiInsert.params[2], "2026-09-13"); // data_as_of_date(市場データ基準日)
-    assert.equal(aiInsert.params[3], "2026-09-14T06:00:00Z"); // generated_at
-    // INSERT方式（UPDATEやINSERT OR REPLACEではない）であることを確認
-    assert.ok(!aiInsert.sql.includes("REPLACE"));
-    assert.ok(!aiInsert.sql.includes("UPDATE"));
   } finally {
     global.fetch = originalFetch;
   }
@@ -802,14 +777,10 @@ await test("saveToD1: 一部テーブルの保存が失敗しても他は継続�
         stocks: [{ code: "7203" }],
         pricesByCode: new Map([["7203", [{ date: "2026-09-13", close: 2800 }]]]),
         financialsByCode: new Map(),
-        analysisResults: [
-          { code: "7203", dataAsOf: "2026-09-13", score: 80, positiveFactors: [], negativeFactors: [] },
-        ],
       }
     );
-    // stock_pricesは失敗するが、stocksとai_evaluationsは成功している
+    // stock_pricesは失敗するが、stocksは成功している
     assert.equal(result.stocks, 1);
-    assert.equal(result.aiEvaluations, 1);
     assert.ok(result.failures.some((f) => f.stage === "stock_prices"));
   } finally {
     global.fetch = originalFetch;
@@ -836,12 +807,50 @@ await test("saveToD1: stocksにname/marketが含まれる場合はそのままst
         stocks: [{ code: "7203", name: "トヨタ自動車", market: "プライム" }],
         pricesByCode: new Map(),
         financialsByCode: new Map(),
-        analysisResults: [],
       }
     );
     const stocksInsert = capturedBodies.find((b) => b.sql.includes("INSERT OR REPLACE INTO stocks"));
     assert.ok(stocksInsert, "stocksへのINSERTが実行されていない");
     assert.deepEqual(stocksInsert.params, ["7203", "トヨタ自動車", "プライム", stocksInsert.params[3]]);
+    // saveToD1はai_evaluationsをもう保存しない(saveEvaluationIncrementalへ移動済み)
+    const aiInsert = capturedBodies.find((b) => b.sql.includes("INSERT INTO ai_evaluations"));
+    assert.equal(aiInsert, undefined);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+await test("saveEvaluationIncremental: AI評価1件をその場で即時保存し、3つの日付を正しく設定する", async () => {
+  process.env.CF_ACCOUNT_ID = "acc";
+  process.env.CF_D1_DATABASE_ID = "db";
+  process.env.CF_API_TOKEN = "tok";
+  const originalFetch = global.fetch;
+  const capturedBodies = [];
+  global.fetch = async (url, opts) => {
+    capturedBodies.push(JSON.parse(opts.body));
+    return new Response(
+      JSON.stringify({ success: true, result: [{ results: [], meta: { last_row_id: 7 } }] }),
+      { status: 200 }
+    );
+  };
+  try {
+    const { saveEvaluationIncremental } = await import("../src/pipelineD1.js");
+    const { D1Client } = await import("../src/d1.js");
+    const d1 = new D1Client({ accountId: "acc", databaseId: "db", apiToken: "tok" });
+    const id = await saveEvaluationIncremental(
+      d1,
+      { predictionExecutedAt: "2026-09-14T06:00:00Z", cutoffDate: "2026-09-13" },
+      { code: "7203", dataAsOf: "2026-09-13", score: 82, rating: "BUY", price: 2800, positiveFactors: [], negativeFactors: [] },
+      new Set()
+    );
+    assert.equal(id, 7);
+    const aiInsert = capturedBodies.find((b) => b.sql.includes("INSERT INTO ai_evaluations"));
+    assert.ok(aiInsert, "ai_evaluationsへのINSERTが実行されていない");
+    assert.equal(aiInsert.params[1], "2026-09-14"); // evaluation_date(実行日)
+    assert.equal(aiInsert.params[2], "2026-09-13"); // data_as_of_date(市場データ基準日)
+    assert.equal(aiInsert.params[3], "2026-09-14T06:00:00Z"); // generated_at
+    // INSERT方式（UPDATEやINSERT OR REPLACEではない）であることを確認
+    assert.ok(!aiInsert.sql.includes("REPLACE"));
+    assert.ok(!aiInsert.sql.includes("UPDATE"));
   } finally {
     global.fetch = originalFetch;
   }
@@ -1819,7 +1828,7 @@ await test("当日の特徴量が無い保有銘柄はスキップされる(miss
   assert.deepEqual(missingFeatureCodes, ["0000"]);
 });
 
-await test("saveToD1: heldExtraCodesに含まれる銘柄はsource:holding、それ以外はsource:pipeline", async () => {
+await test("saveEvaluationIncremental: heldExtraCodesに含まれる銘柄はsource:holding、それ以外はsource:pipeline", async () => {
   process.env.CF_ACCOUNT_ID = "acc";
   process.env.CF_D1_DATABASE_ID = "db";
   process.env.CF_API_TOKEN = "tok";
@@ -1833,20 +1842,13 @@ await test("saveToD1: heldExtraCodesに含まれる銘柄はsource:holding、そ
     );
   };
   try {
-    const { saveToD1 } = await import("../src/pipelineD1.js");
-    await saveToD1(
-      { predictionExecutedAt: "2026-09-21T06:00:00Z", cutoffDate: "2026-09-19" },
-      {
-        stocks: [],
-        pricesByCode: new Map(),
-        financialsByCode: new Map(),
-        analysisResults: [
-          { code: "7203", score: 80, positiveFactors: [], negativeFactors: [] },
-          { code: "1301", score: 60, positiveFactors: [], negativeFactors: [] },
-        ],
-        heldExtraCodes: new Set(["1301"]),
-      }
-    );
+    const { saveEvaluationIncremental } = await import("../src/pipelineD1.js");
+    const { D1Client } = await import("../src/d1.js");
+    const d1 = new D1Client({ accountId: "acc", databaseId: "db", apiToken: "tok" });
+    const meta = { predictionExecutedAt: "2026-09-21T06:00:00Z", cutoffDate: "2026-09-19" };
+    const heldExtraCodes = new Set(["1301"]);
+    await saveEvaluationIncremental(d1, meta, { code: "7203", score: 80, positiveFactors: [], negativeFactors: [] }, heldExtraCodes);
+    await saveEvaluationIncremental(d1, meta, { code: "1301", score: 60, positiveFactors: [], negativeFactors: [] }, heldExtraCodes);
     const inserts = capturedBodies.filter((b) => b.sql.includes("INSERT INTO ai_evaluations"));
     assert.equal(inserts.find((b) => b.params[0] === "7203").params[17], "pipeline");
     assert.equal(inserts.find((b) => b.params[0] === "1301").params[17], "holding");
@@ -1855,7 +1857,7 @@ await test("saveToD1: heldExtraCodesに含まれる銘柄はsource:holding、そ
   }
 });
 
-await test("saveToD1: heldExtraCodes省略時は全てsource:pipeline（既存動作の回帰確認）", async () => {
+await test("saveEvaluationIncremental: heldExtraCodes省略時は全てsource:pipeline（既存動作の回帰確認）", async () => {
   process.env.CF_ACCOUNT_ID = "acc";
   process.env.CF_D1_DATABASE_ID = "db";
   process.env.CF_API_TOKEN = "tok";
@@ -1869,10 +1871,14 @@ await test("saveToD1: heldExtraCodes省略時は全てsource:pipeline（既存�
     );
   };
   try {
-    const { saveToD1 } = await import("../src/pipelineD1.js");
-    await saveToD1(
+    const { saveEvaluationIncremental } = await import("../src/pipelineD1.js");
+    const { D1Client } = await import("../src/d1.js");
+    const d1 = new D1Client({ accountId: "acc", databaseId: "db", apiToken: "tok" });
+    await saveEvaluationIncremental(
+      d1,
       { predictionExecutedAt: "2026-09-21T06:00:00Z", cutoffDate: "2026-09-19" },
-      { stocks: [], pricesByCode: new Map(), financialsByCode: new Map(), analysisResults: [{ code: "7203", score: 80, positiveFactors: [], negativeFactors: [] }] }
+      { code: "7203", score: 80, positiveFactors: [], negativeFactors: [] },
+      undefined
     );
     const insert = capturedBodies.find((b) => b.sql.includes("INSERT INTO ai_evaluations"));
     assert.equal(insert.params[17], "pipeline");
@@ -1880,6 +1886,232 @@ await test("saveToD1: heldExtraCodes省略時は全てsource:pipeline（既存�
     global.fetch = originalFetch;
   }
 });
+
+console.log("[test] gemini.js (Phase: 1銘柄1リクエスト・リトライ・出力検証・日次上限)");
+
+function makeGeminiFeature(code, overrides = {}) {
+  return { code, name: null, price: 1000, dataAsOf: "2026-09-19", sma5: 990, rsi14: 55, financials: null, ...overrides };
+}
+function geminiJsonResponse(bodyObj, status = 200, headers = {}) {
+  const envelope = { candidates: [{ content: { parts: [{ text: JSON.stringify(bodyObj) }] } }] };
+  return new Response(status === 200 ? JSON.stringify(envelope) : JSON.stringify({ error: bodyObj }), { status, headers });
+}
+const validGeminiResult = (code) => ({
+  code, score: 80, rating: "BUY", expectedReturn: 3.5, expectedHoldingDays: 5, risk: "MEDIUM",
+  upsideProbability: 60, downsideRisk: 30, stance: "positive", reasoning: "r", summary: "s",
+  positiveFactors: [], negativeFactors: [], confidence: 70,
+});
+
+const geminiOriginalIntervalMs = config.GEMINI.requestIntervalMs;
+const geminiOriginalBackoffMs = config.GEMINI.retryBackoffBaseMs;
+config.GEMINI.requestIntervalMs = 1;
+config.GEMINI.retryBackoffBaseMs = 1;
+
+await test("analyzeCandidates: 1銘柄=1リクエストで、他銘柄のコードが混ざらない", async () => {
+  const originalFetch = global.fetch;
+  const { analyzeCandidates } = await import("../src/gemini.js");
+  const prompts = [];
+  global.fetch = async (url, opts) => {
+    const text = JSON.parse(opts.body).contents[0].parts[0].text;
+    prompts.push(text);
+    return geminiJsonResponse(validGeminiResult(text.match(/銘柄コード (\w+)/)[1]));
+  };
+  try {
+    const results = await analyzeCandidates(
+      "key",
+      [makeGeminiFeature("1001"), makeGeminiFeature("1002")],
+      { cutoffDate: "2026-09-19", predictionExecutedAt: "t" }
+    );
+    assert.equal(prompts.length, 2);
+    assert.equal(results.length, 2);
+    assert.ok(prompts[0].includes("1001") && !prompts[0].includes("1002"));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+await test("429: リトライ後成功する / リトライ上限で失敗扱いになる(無限リトライしない)", async () => {
+  const originalFetch = global.fetch;
+  const { analyzeWithGemini } = await import("../src/gemini.js");
+  let callCount = 0;
+  global.fetch = async () => {
+    callCount++;
+    if (callCount === 1) return geminiJsonResponse({ message: "rate limited" }, 429);
+    return geminiJsonResponse(validGeminiResult("2001"));
+  };
+  try {
+    const outcome = await analyzeWithGemini("key", makeGeminiFeature("2001"));
+    assert.equal(outcome.success, true);
+    assert.equal(outcome.attempts, 2);
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  callCount = 0;
+  global.fetch = async () => {
+    callCount++;
+    return geminiJsonResponse({ message: "rate limited" }, 429);
+  };
+  try {
+    const outcome = await analyzeWithGemini("key", makeGeminiFeature("2002"));
+    assert.equal(outcome.success, false);
+    assert.equal(callCount, 1 + config.GEMINI.maxRetries);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+await test("503もリトライ対象、429/503以外は即座に失敗扱い(リトライしない)", async () => {
+  const originalFetch = global.fetch;
+  const { analyzeWithGemini } = await import("../src/gemini.js");
+  let callCount = 0;
+  global.fetch = async () => {
+    callCount++;
+    return geminiJsonResponse({ message: "unavailable" }, 503);
+  };
+  try {
+    const outcome = await analyzeWithGemini("key", makeGeminiFeature("2003"));
+    assert.equal(outcome.statusCounts.status503, 1 + config.GEMINI.maxRetries);
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  callCount = 0;
+  global.fetch = async () => {
+    callCount++;
+    return geminiJsonResponse({ message: "server error" }, 500);
+  };
+  try {
+    await analyzeWithGemini("key", makeGeminiFeature("2004"));
+    assert.equal(callCount, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+await test("JSON不正・銘柄コード不一致・score範囲外・必須項目欠落はいずれも失敗扱い", async () => {
+  const originalFetch = global.fetch;
+  const { analyzeWithGemini } = await import("../src/gemini.js");
+
+  global.fetch = async () =>
+    new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "壊れたJSON{{{" }] } }] }), { status: 200 });
+  try {
+    assert.equal((await analyzeWithGemini("key", makeGeminiFeature("3001"))).success, false);
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  global.fetch = async () => geminiJsonResponse(validGeminiResult("9999")); // コード不一致
+  try {
+    const outcome = await analyzeWithGemini("key", makeGeminiFeature("3002"));
+    assert.equal(outcome.success, false);
+    assert.ok(outcome.validationErrors.some((e) => e.includes("銘柄コード不一致")));
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  global.fetch = async () => geminiJsonResponse({ ...validGeminiResult("3003"), score: 200 });
+  try {
+    assert.equal((await analyzeWithGemini("key", makeGeminiFeature("3003"))).success, false);
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  const noSummary = { ...validGeminiResult("3004") };
+  delete noSummary.summary;
+  delete noSummary.reasoning;
+  global.fetch = async () => geminiJsonResponse(noSummary);
+  try {
+    assert.equal((await analyzeWithGemini("key", makeGeminiFeature("3004"))).success, false);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+await test("Geminiが独自のpriceを返しても、こちらのfeature.priceが常に優先される(汚染防止)", async () => {
+  const originalFetch = global.fetch;
+  const { analyzeWithGemini } = await import("../src/gemini.js");
+  global.fetch = async () => geminiJsonResponse({ ...validGeminiResult("4001"), price: 999999 });
+  try {
+    const outcome = await analyzeWithGemini("key", makeGeminiFeature("4001", { price: 1234 }));
+    assert.equal(outcome.success, true);
+    assert.equal(outcome.result.price, 1234);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+await test("1銘柄目の失敗で処理全体が中断しない", async () => {
+  const originalFetch = global.fetch;
+  const { analyzeCandidates } = await import("../src/gemini.js");
+  global.fetch = async (url, opts) => {
+    const code = JSON.parse(opts.body).contents[0].parts[0].text.match(/銘柄コード (\w+)/)[1];
+    if (code === "5001") return geminiJsonResponse({ message: "err" }, 500);
+    return geminiJsonResponse(validGeminiResult(code));
+  };
+  try {
+    const results = await analyzeCandidates(
+      "key",
+      [makeGeminiFeature("5001"), makeGeminiFeature("5002")],
+      { cutoffDate: "2026-09-19", predictionExecutedAt: "t" }
+    );
+    assert.deepEqual(results.map((r) => r.code), ["5002"]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+await test("dailyRequestLimitに達したら残りの銘柄には着手しない", async () => {
+  const original = config.GEMINI.dailyRequestLimit;
+  config.GEMINI.dailyRequestLimit = 1;
+  const originalFetch = global.fetch;
+  const { analyzeCandidates } = await import("../src/gemini.js");
+  let callCount = 0;
+  global.fetch = async (url, opts) => {
+    callCount++;
+    const code = JSON.parse(opts.body).contents[0].parts[0].text.match(/銘柄コード (\w+)/)[1];
+    return geminiJsonResponse(validGeminiResult(code));
+  };
+  try {
+    const results = await analyzeCandidates(
+      "key",
+      [makeGeminiFeature("6001"), makeGeminiFeature("6002"), makeGeminiFeature("6003")],
+      { cutoffDate: "2026-09-19", predictionExecutedAt: "t" }
+    );
+    assert.equal(callCount, 1);
+    assert.equal(results.length, 1);
+  } finally {
+    global.fetch = originalFetch;
+    config.GEMINI.dailyRequestLimit = original;
+  }
+});
+
+await test("onCandidateCompleteフックが成功/失敗それぞれで正しい情報とともに呼ばれる(D1即時保存用)", async () => {
+  const originalFetch = global.fetch;
+  const { analyzeCandidates } = await import("../src/gemini.js");
+  global.fetch = async (url, opts) => {
+    const code = JSON.parse(opts.body).contents[0].parts[0].text.match(/銘柄コード (\w+)/)[1];
+    if (code === "7002") return geminiJsonResponse({ message: "err" }, 500);
+    return geminiJsonResponse(validGeminiResult(code));
+  };
+  const outcomes = [];
+  try {
+    await analyzeCandidates(
+      "key",
+      [makeGeminiFeature("7001"), makeGeminiFeature("7002")],
+      { cutoffDate: "2026-09-19", predictionExecutedAt: "t" },
+      { onCandidateComplete: (o) => outcomes.push(o) }
+    );
+    assert.equal(outcomes.length, 2);
+    assert.equal(outcomes[0].success, true);
+    assert.equal(outcomes[1].success, false);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+config.GEMINI.requestIntervalMs = geminiOriginalIntervalMs;
+config.GEMINI.retryBackoffBaseMs = geminiOriginalBackoffMs;
 
 console.log(`\n[test] ${passed}件成功`);
 if (process.exitCode) {
