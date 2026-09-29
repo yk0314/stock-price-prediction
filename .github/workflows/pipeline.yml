@@ -24,7 +24,10 @@ on:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 50 # 全銘柄モード(UNIVERSE_MODE=all)での実行も考慮し延長
+    # 全銘柄モードのデータ取得(約15分) + Gemini 150銘柄×30秒間隔(約75分) + 429/503リトライの余裕を見込む。
+    # 以前の50分では、Gemini 150銘柄を処理しきる前にジョブが強制終了されてしまう。
+    # (1銘柄ごとにD1へ即時保存しているため、強制終了時もそこまでの成功分は失われない。)
+    timeout-minutes: 150
     steps:
       - name: リポジトリをチェックアウト
         uses: actions/checkout@v4
@@ -44,6 +47,20 @@ jobs:
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
           CUTOFF_DATE: ${{ inputs.cutoffDate }}
           UNIVERSE_MODE: ${{ inputs.universeMode }}
+          # --- Gemini関連の外部設定値 ---
+          # 以前はconfig.js側でprocess.env.GEMINI_MAX_STOCKS等を読む実装だけがあり、
+          # ここ(ワークフロー定義)でリポジトリ変数をenvへ配線していなかったため、
+          # Settings > Variables に値を設定しても実行時には一切反映されず、
+          # 常にconfig.js側のデフォルト値(例: candidateCount=10)にフォールバックしていた。
+          # vars.*が未設定の場合は空文字列になり、config.js側の`Number("") || デフォルト値`で
+          # 従来通り安全なデフォルト値にフォールバックするため、この変更単体で既存の挙動を壊さない。
+          GEMINI_MAX_STOCKS: ${{ vars.GEMINI_MAX_STOCKS }}
+          GEMINI_REQUEST_INTERVAL_MS: ${{ vars.GEMINI_REQUEST_INTERVAL_MS }}
+          GEMINI_MAX_RETRIES: ${{ vars.GEMINI_MAX_RETRIES }}
+          GEMINI_RETRY_BACKOFF_BASE_MS: ${{ vars.GEMINI_RETRY_BACKOFF_BASE_MS }}
+          GEMINI_429_BACKOFF_MS: ${{ vars.GEMINI_429_BACKOFF_MS }}
+          GEMINI_CONSECUTIVE_429_LIMIT: ${{ vars.GEMINI_CONSECUTIVE_429_LIMIT }}
+          GEMINI_DAILY_REQUEST_LIMIT: ${{ vars.GEMINI_DAILY_REQUEST_LIMIT }}
         run: node src/pipeline.js
 
       # raw-data / normalized-data / features / screened / gemini-results / ranking の

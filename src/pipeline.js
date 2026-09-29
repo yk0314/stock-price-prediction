@@ -75,6 +75,25 @@ export function selectHeldExtraCandidates(heldCodes, normalCandidateCodes, featu
   return { heldExtraCandidates, missingFeatureCodes, duplicateCount };
 }
 
+/**
+ * Gemini処理順は「①保有銘柄 → ②新規候補」。保有銘柄は既存仕様どおり必ず再評価対象にし、
+ * 通常候補と重複する銘柄(=元々geminiCandidatesに含まれていた保有銘柄)は二重に送らない
+ * （heldExtraCandidatesは元々selectHeldExtraCandidates()で重複を除いた「追加分」のみなので、
+ *  単純に前後を入れ替えて連結するだけでよい）。
+ * 各候補には isHeld フラグを付与する。heldExtraCandidatesだけでなく、通常候補の中に
+ * 元々保有銘柄が含まれていた場合(重複ケース)も正しくisHeld=trueにするため、
+ * allHeldCodes(保有銘柄の全量)との突き合わせで判定する
+ * （Geminiプロンプトの出し分け=買う価値判定の要否に使う）。
+ * 渡された候補オブジェクトを直接書き換える(mutate)点に注意。
+ */
+export function buildCombinedCandidates(heldExtraCandidates, geminiCandidates, allHeldCodes) {
+  const combined = [...heldExtraCandidates, ...geminiCandidates];
+  for (const candidate of combined) {
+    candidate.isHeld = allHeldCodes.has(candidate.code);
+  }
+  return combined;
+}
+
 async function main() {
   const startedAt = new Date();
   const predictionExecutedAt = startedAt.toISOString();
@@ -208,9 +227,11 @@ async function main() {
     : null;
 
   let heldExtraCandidates = [];
+  let allHeldCodes = new Set();
   if (d1) {
     try {
       const heldCodes = await fetchHeldCodes(d1);
+      allHeldCodes = new Set(heldCodes);
       const selection = selectHeldExtraCandidates(heldCodes, normalCandidateCodes, featureByCode);
       heldExtraCandidates = selection.heldExtraCandidates;
       console.log(
@@ -227,9 +248,7 @@ async function main() {
     console.log("[pipeline] CF_D1_DATABASE_ID未設定のため、保有銘柄の再評価はスキップ");
   }
   const heldExtraCodes = new Set(heldExtraCandidates.map((c) => c.code));
-  // 財務データ取得・Gemini分析はこのcombinedCandidatesに対して行う。
-  // geminiCandidates自体（通常候補選定ロジック・件数）は一切変更していないことに注意。
-  const combinedCandidates = [...geminiCandidates, ...heldExtraCandidates];
+  const combinedCandidates = buildCombinedCandidates(heldExtraCandidates, geminiCandidates, allHeldCodes);
 
   // --- Stage 4.5: 財務データ — Gemini対象銘柄(通常候補+保有銘柄追加分)にのみ、銘柄コード指定で取得 ---
   // 全銘柄(数千件)やスクリーニングプール(百件超)に対して行うと非現実的なため、
@@ -285,6 +304,11 @@ async function main() {
     {
       onCandidateComplete: async (outcome) => {
         if (!d1) return; // D1未接続時は即時保存もエラーログ記録もできないため何もしない
+        if (outcome.excluded) {
+          // 新規候補が「買う価値なし」と判定されただけであり、エラーではない。
+          // 正常評価としてD1に保存する必要はなく、error_logsに記録する必要もない。
+          return;
+        }
         if (outcome.success) {
           try {
             const id = await saveEvaluationIncremental(d1, metaForEval, outcome.result, heldExtraCodes);

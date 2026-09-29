@@ -104,8 +104,8 @@ export const config = {
     model: "gemini-3.5-flash",
 
     // スクリーニングプール(poolSize件、最大150)の中から、実際にGeminiへ渡す件数。
-    // GEMINI_MAX_STOCKS で上書き可能（例: 150を指定すればプール全件を1銘柄ずつ分析する）。
-    candidateCount: Number(process.env.GEMINI_MAX_STOCKS) || 10,
+    // 既定値はプールサイズと同じ150(=プール全件を分析)。GEMINI_MAX_STOCKS で上書き可能。
+    candidateCount: Number(process.env.GEMINI_MAX_STOCKS) || 150,
 
     // Gemini呼び出し1回あたりのタイムアウト(ms)
     timeoutMs: 30000,
@@ -126,9 +126,20 @@ export const config = {
     retryBackoffBaseMs: Number(process.env.GEMINI_RETRY_BACKOFF_BASE_MS) || 15000,
 
     // 1回のパイプライン実行あたりのGemini APIリクエスト上限（通常分析+リトライの合計）。
-    // GEMINI_DAILY_REQUEST_LIMIT で上書き可能。上限に達したら、その回の残り銘柄の分析は
+    // GEMINI_DAILY_REQUEST_LIMIT で上書き可能。既定値はcandidateCount(既定150)に
+    // リトライ分の余裕(平均2倍程度)を見込んだ値。上限に達したら、その回の残り銘柄の分析は
     // 安全側にスキップして処理を打ち切る（パイプライン自体は継続する）。
-    dailyRequestLimit: Number(process.env.GEMINI_DAILY_REQUEST_LIMIT) || 200,
+    dailyRequestLimit: Number(process.env.GEMINI_DAILY_REQUEST_LIMIT) || 300,
+
+    // 429(レート制限)専用のバックオフ時間(ms)。503の指数バックオフ(retryBackoffBaseMs)とは別扱いにする。
+    // Retry-Afterヘッダがあれば常にそちらを優先し、この値はRetry-Afterが無い場合のみ使う。
+    // GEMINI_429_BACKOFF_MS で上書き可能。
+    backoff429Ms: Number(process.env.GEMINI_429_BACKOFF_MS) || 45000,
+
+    // 429が何回連続したら、その日のGemini処理を安全停止するか。
+    // 単発の429では停止しない(通常のリトライで吸収する)。成功した銘柄があれば連続カウントは0に戻る。
+    // GEMINI_CONSECUTIVE_429_LIMIT で上書き可能。
+    consecutive429Limit: Number(process.env.GEMINI_CONSECUTIVE_429_LIMIT) || 5,
   },
 
   // --- 最終ランキングに残す銘柄数 ---
