@@ -101,7 +101,7 @@ export const config = {
     // gemini-2.0系・gemini-2.5系は2026年中に順次シャットダウン予定のため使用しない。
     // 実装直前に https://aistudio.google.com/ の Rate Limits 画面で
     // このモデルの無料枠(RPM/RPD/TPM)を必ず確認すること。
-    model: "gemini-3.5-flash",
+    model: "gemini-3.5-flash-lite",
 
     // スクリーニングプール(poolSize件、最大150)の中から、実際にGeminiへ渡す件数。
     // 既定値はプールサイズと同じ150(=プール全件を分析)。GEMINI_MAX_STOCKS で上書き可能。
@@ -123,7 +123,8 @@ export const config = {
 
     // リトライ時の基本バックオフ時間(ms)。実際の待機時間は 試行回数 に応じて指数的に増える
     // （かつAPIレスポンスにRetry-Afterが含まれていればそちらを優先する）。
-    retryBackoffBaseMs: Number(process.env.GEMINI_RETRY_BACKOFF_BASE_MS) || 15000,
+    retryBackoffBaseMs:
+      Number(process.env.GEMINI_RETRY_BACKOFF_BASE_MS) || 15000,
 
     // 1回のパイプライン実行あたりのGemini APIリクエスト上限（通常分析+リトライの合計）。
     // GEMINI_DAILY_REQUEST_LIMIT で上書き可能。既定値はcandidateCount(既定150)に
