@@ -105,6 +105,10 @@ export class CloudflareKV {
  * 【将来の投資管理機能（売買履歴）との名前空間設計】
  * 今後追加予定の「自分の売買履歴・収支管理」機能は、上記のいずれとも重複しない
  * 別プレフィックス（例: "trade:{code}:{tradeId}"）を使うことを想定している。
+ *
+ * 【注意】stocks / pricesByCode は未指定(undefined)なら書き込まない。
+ * pipeline.js では stocks と prices:{code} を Gemini 処理の前に
+ * saveMarketDataToKV() で保存するため、この関数には渡さない。
  */
 export async function saveResultsToKV(
   kv,
@@ -120,6 +124,23 @@ export async function saveResultsToKV(
     // 異なるcutoffDateであれば別キーとして蓄積される。
     await kv.put(`history:${meta.cutoffDate}:${code}`, analysis);
   }
+
+  if (pricesByCode) {
+    for (const [code, prices] of Object.entries(pricesByCode)) {
+      await kv.put(`prices:${code}`, prices);
+    }
+  }
+}
+
+/**
+ * Gemini評価に依存しない表示用データ(stocks一覧・プール銘柄の簡易株価)だけをKVへ保存する。
+ * Gemini処理より前に呼び出し、Gemini処理が長引いて途中終了しても
+ * 現在価格・銘柄名が更新済みになるようにするために分離している。
+ * ranking / analysis / history / meta は従来どおり saveResultsToKV() で保存する
+ * （書き込み回数は増えない: stocks と prices:{code} は saveResultsToKV 側では書かなくなる）。
+ */
+export async function saveMarketDataToKV(kv, { stocks, pricesByCode }) {
+  if (stocks) await kv.put("stocks", stocks);
 
   if (pricesByCode) {
     for (const [code, prices] of Object.entries(pricesByCode)) {

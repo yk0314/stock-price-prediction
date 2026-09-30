@@ -5,7 +5,7 @@ import { normalizeRawRows, groupByCode } from "./normalize.js";
 import { computeFeaturesForAll } from "./features.js";
 import { screenToPool, selectGeminiCandidates } from "./screening.js";
 import { analyzeCandidates } from "./gemini.js";
-import { CloudflareKV, saveResultsToKV } from "./kv.js";
+import { CloudflareKV, saveResultsToKV, saveMarketDataToKV } from "./kv.js";
 import { saveToD1, saveEvaluationIncremental } from "./pipelineD1.js";
 import { writeArtifact } from "./artifacts.js";
 import { fetchTopixForRange, computeMarketFeatures, computeRelativeStrength } from "./market.js";
@@ -286,6 +286,76 @@ async function main() {
     candidate.name = listedInfoByCode.get(candidate.code)?.name ?? null;
   }
 
+  // --- Stage 4.9: Gemini評価に依存しないデータの保存（Gemini処理より前に実行する） ---
+  // Gemini処理は2時間以上かかるため、途中終了(timeout等)しても現在価格・銘柄名・株価履歴・財務データは
+  // 更新済みになるよう、Gemini処理(Stage 5)より前に保存する。
+  // ranking / analysis / history / meta は従来どおりGemini完了後(Stage 7)に保存する。
+  // ここでの保存に失敗しても警告にとどめ、Gemini処理は続行する（補助的な保存で全体を止めない）。
+
+  // 銘柄一覧（KV向け。1件のJSON blobとして保存するため、プールに関わらず
+  // 特徴量が計算できた全銘柄分を含めてよい。全銘柄運用時は数千件になりうるが、
+  // KVの1バリューあたりの上限(25MB)には収まる想定で、書き込み回数も1回のまま増えない）。
+  const stocks = featureList.map((f) => {
+    const info = listedInfoByCode.get(f.code);
+    return {
+      code: f.code,
+      price: f.price,
+      dataAsOf: f.dataAsOf,
+      name: info?.name ?? null,
+      market: info?.market ?? null,
+    };
+  });
+
+  // 簡易株価(prices:{code})はコードごとに個別キーとして書き込むため、
+  // 全銘柄分(grouped)を書き込むとKV無料枠の1日1,000書き込み上限を超過してしまう
+  // （全銘柄モードでは実際に約3,900件書き込もうとして429エラーが発生した）。
+  // D1向け保存と同じ方針で、スクリーニングプール(pool)に残った銘柄のみに限定する。
+  const poolCodes = new Set(pool.map((p) => p.code));
+  const pricesByCode = {};
+  for (const code of poolCodes) {
+    const rows = grouped.get(code);
+    if (!rows) continue;
+    // features.js が実際に参照するウィンドウ（最新+N営業日前まで）と一致させる
+    pricesByCode[code] = rows.slice(-(config.FEATURE_LOOKBACK_TRADING_DAYS + 1));
+  }
+
+  let kvClient = null;
+  try {
+    kvClient = new CloudflareKV({
+      accountId: process.env.CF_ACCOUNT_ID,
+      namespaceId: process.env.CF_KV_NAMESPACE_ID,
+      apiToken: process.env.CF_API_TOKEN,
+    });
+    await saveMarketDataToKV(kvClient, { stocks, pricesByCode });
+    console.log("[pipeline] KV: stocks / prices を保存しました（Gemini処理の前）");
+  } catch (err) {
+    console.warn(`[pipeline] KV: stocks / prices の事前保存に失敗（Gemini処理は続行）: ${err.message}`);
+  }
+
+  // D1: stocks / stock_prices / financials（プール銘柄のみ。全銘柄保存はしない）。
+  // 【重要・全銘柄運用時の設計】D1は1クエリあたり100バインド変数までという制約があり、
+  // 全銘柄×約41日分の生データをそのまま書き込むと数万行規模になり非現実的なため、
+  // 「スクリーニングプール(pool)に残った銘柄」のみに限定する。
+  // saveToD1()の第1引数metaは関数内で使われていないため、最小限の値だけ渡す。
+  const pricesByCodeForD1 = new Map(Object.entries(pricesByCode));
+  const stocksForD1 = stocks.filter((s) => poolCodes.has(s.code));
+  let d1Summary;
+  try {
+    d1Summary = await saveToD1(
+      { cutoffDate, predictionExecutedAt },
+      { stocks: stocksForD1, pricesByCode: pricesByCodeForD1, financialsByCode }
+    );
+  } catch (err) {
+    console.warn(`[pipeline] D1: stocks / stock_prices / financials の事前保存に失敗（Gemini処理は続行）: ${err.message}`);
+    d1Summary = {
+      enabled: false,
+      stocks: 0,
+      stockPrices: 0,
+      financials: 0,
+      failures: [{ stage: "pre_gemini_save", error: err.message }],
+    };
+  }
+
   // --- Stage 5: gemini — AI分析（通常候補+保有銘柄追加分。1リクエスト=1銘柄。429/503は設定回数までリトライ） ---
   // 1銘柄成功するたびにD1のai_evaluationsへ即時保存する（150銘柄分をメモリに貯めてから
   // 最後に一括保存すると、GitHub Actionsが途中で停止した際にそれまでの成功分が全て失われるため）。
@@ -361,35 +431,6 @@ async function main() {
     analysisByCode[result.code] = result;
   }
 
-  // 銘柄一覧（KV向け。1件のJSON blobとして保存するため、プールに関わらず
-  // 特徴量が計算できた全銘柄分を含めてよい。全銘柄運用時は数千件になりうるが、
-  // KVの1バリューあたりの上限(25MB)には収まる想定で、書き込み回数も1回のまま増えない）。
-  const stocks = featureList.map((f) => {
-    const info = listedInfoByCode.get(f.code);
-    return {
-      code: f.code,
-      price: f.price,
-      dataAsOf: f.dataAsOf,
-      name: info?.name ?? null,
-      market: info?.market ?? null,
-    };
-  });
-
-
-  // 簡易株価(prices:{code})はコードごとに個別キーとして書き込むため、
-  // 全銘柄分(grouped)を書き込むとKV無料枠の1日1,000書き込み上限を超過してしまう
-  // （全銘柄モードでは実際に約3,900件書き込もうとして429エラーが発生した）。
-  // D1向け保存(Stage 8)と同じ方針で、スクリーニングプール(pool)に残った銘柄のみに限定する。
-  // poolCodesはStage 8のD1向けフィルタでも再利用する。
-  const poolCodes = new Set(pool.map((p) => p.code));
-  const pricesByCode = {};
-  for (const code of poolCodes) {
-    const rows = grouped.get(code);
-    if (!rows) continue;
-    // features.js が実際に参照するウィンドウ（最新+N営業日前まで）と一致させる
-    pricesByCode[code] = rows.slice(-(config.FEATURE_LOOKBACK_TRADING_DAYS + 1));
-  }
-
   const finishedAt = new Date();
   const processingTimeMs = finishedAt.getTime() - startedAt.getTime();
   const meta = {
@@ -413,35 +454,23 @@ async function main() {
     apiErrorCounts,
   };
 
-  // --- Stage 7: Cloudflare KV へ保存（表示用データ + バックテスト用の追記履歴） ---
-  const kv = new CloudflareKV({
-    accountId: process.env.CF_ACCOUNT_ID,
-    namespaceId: process.env.CF_KV_NAMESPACE_ID,
-    apiToken: process.env.CF_API_TOKEN,
-  });
-  await saveResultsToKV(kv, { meta, ranking, analysisByCode, stocks, pricesByCode });
+  // --- Stage 7: Cloudflare KV へ保存（ranking / analysis / history / meta） ---
+  // stocks と prices:{code} は Stage 4.9 で保存済みのため、ここでは渡さない
+  // （saveResultsToKV は stocks / pricesByCode が未指定なら書き込まない）。
+  const kv =
+    kvClient ??
+    new CloudflareKV({
+      accountId: process.env.CF_ACCOUNT_ID,
+      namespaceId: process.env.CF_KV_NAMESPACE_ID,
+      apiToken: process.env.CF_API_TOKEN,
+    });
+  await saveResultsToKV(kv, { meta, ranking, analysisByCode });
 
   console.log("[pipeline] KVへの保存が正常終了しました。");
 
-  // --- Stage 8: Cloudflare D1 へ保存（Phase2で追加。KVへの保存は上で完了済み） ---
-  // 【重要・全銘柄運用時の設計】D1へのstock_prices/stocksの書き込みは、
-  // 全銘柄(数千件)ではなく「スクリーニングプール(pool)に残った銘柄」のみに限定する。
-  // 理由: D1は1クエリあたり100バインド変数までという制約があり、全銘柄×約41日分の
-  // 生データをそのまま書き込もうとすると数万行規模になり、書き込みリクエスト数・
-  // 処理時間の両面で非現実的になるため。プール銘柄程度の規模であれば無理なく収まる。
-  // KVのprices:{code}もStage 7で同じくプール限定に修正済み（KV無料枠1日1,000書き込み対策）。
-  // stocks（銘柄一覧のサマリ）だけは1件のJSON blobとして保存するため、全銘柄分を含めてよい。
-  // poolCodesはStage 7で定義済み。pricesByCodeも既にプール限定で作成済みなのでそのままMap化する。
-  const pricesByCodeForD1 = new Map(Object.entries(pricesByCode));
-  const stocksForD1 = stocks.filter((s) => poolCodes.has(s.code));
-
-  const d1Summary = await saveToD1(meta, {
-    stocks: stocksForD1,
-    pricesByCode: pricesByCodeForD1,
-    financialsByCode,
-  });
-
-  // ai_evaluationsはStage 5で1銘柄ずつ即時保存済みのため、ここでは
+  // --- Stage 8: Cloudflare D1 ---
+  // stocks / stock_prices / financials は Stage 4.9（Gemini処理の前）で保存済み。
+  // ai_evaluationsは Stage 5 で1銘柄ずつ即時保存済みのため、ここでは
   // その集計結果をsaveToD1()の戻り値(stocks/stock_prices/financialsのみ)にマージするだけでよい。
   d1Summary.aiEvaluations = aiEvaluationsSavedCount;
   d1Summary.savedEvaluationIds = savedEvaluationIds;

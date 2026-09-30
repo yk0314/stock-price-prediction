@@ -1,6 +1,11 @@
 // Cloudflare Workers API のベースURL。
 const API_BASE = "https://jp-stock-ai-app-api.yk0314.workers.dev";
 
+// ランキングは、APIから多めに取得し(保有銘柄の除外・並べ替えの後でも候補が減らないようにする)、
+// 画面には上位N件だけを表示する。
+const RANKING_FETCH_LIMIT = 100;
+const RANKING_DISPLAY_LIMIT = 20;
+
 async function fetchJson(path) {
   const res = await fetch(API_BASE + path);
   if (!res.ok) {
@@ -195,7 +200,7 @@ async function loadHome() {
 
   try {
     const [ranking, holdings, meta] = await Promise.all([
-      fetchJson("/api/ranking"),
+      fetchJson(`/api/ranking?limit=${RANKING_FETCH_LIMIT}`),
       fetchJson("/api/holdings"),
       fetchJson("/api/meta"),
     ]);
@@ -207,7 +212,9 @@ async function loadHome() {
     const displayRanking = sortRankingForDisplay(excludeHeldCodes(ranking, heldCodes)).slice(0, 4);
     rankingPreviewEl.innerHTML = displayRanking.length
       ? displayRanking.map((item, i) => renderRankingCard(item, i + 1)).join("")
-      : `<div class="no-data">現在、購入候補となる評価結果がありません。</div>`;
+      : ranking.length === 0
+        ? `<div class="no-data">本日のランキングデータがありません。</div>`
+        : `<div class="no-data">現在、購入候補となる評価結果がありません。</div>`;
 
     const dateByCode = await getLatestBuyDateByCode();
     const sortedHoldings = sortHoldingsByAcquisitionDesc(holdings, dateByCode);
@@ -272,9 +279,16 @@ async function loadRanking() {
   const el = document.getElementById("ranking-list");
   el.textContent = "読み込み中...";
   try {
-    const [ranking, holdings] = await Promise.all([fetchJson("/api/ranking"), fetchJson("/api/holdings")]);
+    const [ranking, holdings] = await Promise.all([
+      fetchJson(`/api/ranking?limit=${RANKING_FETCH_LIMIT}`),
+      fetchJson("/api/holdings"),
+    ]);
+    if (ranking.length === 0) {
+      el.innerHTML = `<div class="no-data">本日のランキングデータがありません。</div>`;
+      return;
+    }
     const heldCodes = new Set(holdings.map((h) => h.code));
-    const display = sortRankingForDisplay(excludeHeldCodes(ranking, heldCodes));
+    const display = sortRankingForDisplay(excludeHeldCodes(ranking, heldCodes)).slice(0, RANKING_DISPLAY_LIMIT);
     el.innerHTML = display.length
       ? display.map((item, i) => renderRankingCard(item, i + 1)).join("")
       : `<div class="no-data">現在、表示できる評価結果がありません（保有銘柄は除外されています）。</div>`;

@@ -1,7 +1,11 @@
 name: JP Stock AI Pipeline
 
 on:
-  # Phase 1では手動実行のみ。パイプラインが安定するまで自動実行は追加しない。
+  # 平日 21:00 JST (= 12:00 UTC) に自動実行する。
+  # GitHub Actionsのscheduleは数分〜数十分遅れることがある。
+  # scheduleはデフォルトブランチ(main)のワークフローだけが対象になる。
+  schedule:
+    - cron: "0 12 * * 1-5"
   workflow_dispatch:
     inputs:
       cutoffDate:
@@ -17,17 +21,19 @@ on:
           - all
         default: phase1_subset
 
-  # --- 将来、日次自動実行を追加する場合は以下のコメントを外す ---
-  # schedule:
-  #   - cron: "0 9 * * 1-5" # UTC 09:00 = JST 18:00（平日）
+# 同じworkflowの二重実行を防ぐ。実行中に手動実行や次のscheduleが重なった場合は、
+# 実行中のものを中断せず、後続を待機させる。
+concurrency:
+  group: stock-ai-pipeline
+  cancel-in-progress: false
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    # 全銘柄モードのデータ取得(約15分) + Gemini 150銘柄×30秒間隔(約75分) + 429/503リトライの余裕を見込む。
-    # 以前の50分では、Gemini 150銘柄を処理しきる前にジョブが強制終了されてしまう。
+    # 全銘柄モードのデータ取得(約15分) + 財務取得(約38分) + Gemini 150銘柄×30秒間隔(約76分以上)
+    # + 429/503リトライの余裕を見込んで240分。
     # (1銘柄ごとにD1へ即時保存しているため、強制終了時もそこまでの成功分は失われない。)
-    timeout-minutes: 150
+    timeout-minutes: 240
     steps:
       - name: リポジトリをチェックアウト
         uses: actions/checkout@v4
@@ -46,7 +52,9 @@ jobs:
           CF_KV_NAMESPACE_ID: ${{ secrets.CF_KV_NAMESPACE_ID }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
           CUTOFF_DATE: ${{ inputs.cutoffDate }}
-          UNIVERSE_MODE: ${{ inputs.universeMode }}
+          # schedule実行ではinputsが空になるため、その場合だけ全銘柄(all)にする。
+          # 手動実行(workflow_dispatch)では入力値がそのまま使われる(既定はphase1_subset)。
+          UNIVERSE_MODE: ${{ inputs.universeMode || 'all' }}
           # --- Gemini関連の外部設定値 ---
           # 以前はconfig.js側でprocess.env.GEMINI_MAX_STOCKS等を読む実装だけがあり、
           # ここ(ワークフロー定義)でリポジトリ変数をenvへ配線していなかったため、
