@@ -14,6 +14,14 @@
 const DEFAULT_RANKING_LIMIT = 20;
 const MAX_RANKING_LIMIT = 100;
 
+// ランキング日の切り替え境界: 日本時間の午前3時。
+// generated_at(UTC)に +6時間 (= JST +9時間 - 3時間) を加えた日付が「ランキング日」になる。
+const RANKING_DAY_OFFSET_HOURS = 6;
+
+function currentRankingDay(now = new Date()) {
+  return new Date(now.getTime() + RANKING_DAY_OFFSET_HOURS * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -103,33 +111,37 @@ const EVALUATION_COLUMNS = `
 `;
 
 /**
- * ai_evaluations（D1）から、銘柄ごとに最新の1件だけをscore降順で取得する。
+ * ai_evaluations（D1）から、「今日のランキング日」における最新の1回の実行の評価だけを、
+ * score降順で取得する。
  *
- * 「最新」の判定は evaluation_date/generated_at ではなく id（AUTOINCREMENT）の最大値を使う。
- * ai_evaluationsは追記専用でINSERTのみが行われるため、idの大小＝挿入順（＝新しさ）が
- * 常に保証されており、タイムスタンプの精度や同一実行内での複数レコード発生などの
- * エッジケースを気にする必要がない、最もシンプルで安全な「最新」の定義になる。
- *
- * Gemini分析が存在しない銘柄はそもそもai_evaluationsに行が無いため、
- * 追加のフィルタなしで自然にランキング対象から除外される。
+ * - ランキング日は日本時間の午前3時で切り替わる（currentRankingDay参照）。
+ *   前日以前の評価は表示しない。今日の実行が途中で終了しても、前日や前回完走分へのフォールバックはしない。
+ * - 「1回の実行」は generated_at（実行開始時刻。同じ実行の全評価で同一）で識別する。
+ *   今日のランキング日に複数回実行された場合は、generated_at が最大の実行だけが対象になり、
+ *   古い実行の評価が混ざらない。
+ * - 最新の実行の判定には source を問わず全行を使う。保有銘柄の追加分(source='holding')が
+ *   先に保存されるため、通常候補がまだ0件でも新しい実行を検出できる。
+ * - その実行のうち、source='pipeline'（通常のスクリーニング候補）の行だけを対象にする。
+ * - 今日のランキング日の評価が0件なら、サブクエリがNULLになり結果は0件（空配列）になる。
+ * - 1回の実行内で同じ銘柄の評価は1件のため、銘柄ごとの MAX(id) 集計は不要。
  *
  * stocksテーブルはname/marketが未取得の場合nullになりうる（LEFT JOINで欠損を許容する）。
  */
-async function fetchRanking(db, limit) {
+async function fetchRanking(db, limit, rankingDay) {
   const { results } = await db
     .prepare(
       `SELECT ${EVALUATION_COLUMNS}
        FROM ai_evaluations ae
-       INNER JOIN (
-         SELECT code, MAX(id) AS max_id
-         FROM ai_evaluations
-         GROUP BY code
-       ) latest ON ae.id = latest.max_id
        LEFT JOIN stocks s ON s.code = ae.code
+       WHERE ae.source = 'pipeline'
+         AND ae.generated_at = (
+           SELECT MAX(generated_at) FROM ai_evaluations
+           WHERE date(generated_at, '+${RANKING_DAY_OFFSET_HOURS} hours') = ?
+         )
        ORDER BY ae.score DESC
        LIMIT ?`
     )
-    .bind(limit)
+    .bind(rankingDay, limit)
     .all();
 
   return (results ?? []).map(mapEvaluationRow);
@@ -488,7 +500,9 @@ export default {
         return jsonResponse(meta ?? {});
       }
 
-      // GET /api/ranking — AI評価ランキング（D1のai_evaluationsを参照。銘柄ごとに最新評価のみ、score降順）
+      // GET /api/ranking — AI評価ランキング（D1のai_evaluationsを参照）。
+      // 今日のランキング日（日本時間の午前3時で切り替わる）における最新の1回の実行の評価のみ、score降順。
+      // 前日以前の評価・前回完走分へのフォールバックはしない（今日の評価が0件なら空配列）。
       // クエリパラメータ: limit（省略時20件、上限100件）
       if (path === "/api/ranking") {
         if (!env.DB) {
@@ -502,7 +516,7 @@ export default {
             ? Math.min(limitParam, MAX_RANKING_LIMIT)
             : DEFAULT_RANKING_LIMIT;
         try {
-          const ranking = await fetchRanking(env.DB, limit);
+          const ranking = await fetchRanking(env.DB, limit, currentRankingDay());
           return jsonResponse(ranking);
         } catch (err) {
           console.error(`[worker] /api/ranking D1クエリ失敗: ${err.message}`);
@@ -688,7 +702,7 @@ export default {
 
       // GET /api/holdings — 現在の保有銘柄一覧（保有数量>0の銘柄のみ）。
       // 保有数量・平均取得価格はtradesから移動平均法でその都度計算する（別テーブルは持たない）。
-      // 各銘柄の最新AI評価も併せて返す（保有判断の参考用。fetchRanking同様、銘柄ごとにid最大値=最新1件）。
+      // 各銘柄の最新AI評価も併せて返す（保有判断の参考用。銘柄ごとにid最大値=最新1件）。
       if (path === "/api/holdings") {
         if (!env.DB) return jsonResponse([]);
         try {
