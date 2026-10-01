@@ -1,13 +1,13 @@
 :root {
-  --bg: #0b0f14;
+  --bg: #0a0d12;
   --bg-elevated: #0f141a;
   --surface: #131920;
   --surface-raised: #1a222b;
   --border: #232c37;
   --border-strong: #333f4d;
   --text: #edf1f5;
-  --text-muted: #8994a3;
-  --text-faint: #5c6674;
+  --text-muted: #8f9aa9;
+  --text-faint: #66717f;
 
   --accent: #e8b84b;
   --accent-dim: rgba(232, 184, 75, 0.14);
@@ -26,9 +26,17 @@
   --risk-high: #f0625f;
   --risk-high-bg: rgba(240, 98, 95, 0.13);
 
+  /* グラスモーフィズム用トークン */
+  --glass-bg: rgba(255, 255, 255, 0.045);
+  --glass-bg-strong: rgba(255, 255, 255, 0.075);
+  --glass-border: rgba(255, 255, 255, 0.10);
+  --glass-border-gold: rgba(232, 184, 75, 0.28);
+  --glass-blur: 16px;
+  --glass-shadow: 0 8px 28px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+
   --radius-sm: 8px;
-  --radius: 12px;
-  --radius-lg: 16px;
+  --radius: 14px;
+  --radius-lg: 18px;
 
   --font-ui: "Inter", -apple-system, "Hiragino Kaku Gothic ProN", "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
@@ -36,6 +44,10 @@
 
 * {
   box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 html {
@@ -46,7 +58,12 @@ html {
 body {
   margin: 0;
   font-family: var(--font-ui);
-  background: var(--bg);
+  background:
+    radial-gradient(1100px 560px at 8% -8%, rgba(232, 184, 75, 0.11), transparent 62%),
+    radial-gradient(900px 520px at 100% 4%, rgba(96, 124, 255, 0.08), transparent 58%),
+    radial-gradient(800px 500px at 50% 110%, rgba(232, 184, 75, 0.06), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
   color: var(--text);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -63,15 +80,59 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
+/* ---- グラス面(共通コンポーネント) ----
+   カード・フォーム・チャート・モーダル等、「面」になる要素はすべてここで質感を揃える。 */
+
+.glass,
+.disclaimer,
+.no-data,
+.alert-calm,
+.stats-strip,
+.rank-card,
+.holding-card,
+.trade-card,
+.eval-block,
+.chart-wrap,
+.trade-form,
+.perf-cell,
+.eval-timeline-item,
+.eval-compare {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  box-shadow: var(--glass-shadow);
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass,
+  .disclaimer,
+  .no-data,
+  .alert-calm,
+  .stats-strip,
+  .rank-card,
+  .holding-card,
+  .trade-card,
+  .eval-block,
+  .chart-wrap,
+  .trade-form,
+  .perf-cell,
+  .eval-timeline-item,
+  .eval-compare {
+    background: var(--surface);
+  }
+}
+
 /* ---- ヘッダー ---- */
 
 .app-header {
   position: sticky;
   top: 0;
   z-index: 20;
-  background: rgba(11, 15, 20, 0.92);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--border);
+  background: rgba(10, 13, 18, 0.62);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  backdrop-filter: blur(18px) saturate(150%);
+  border-bottom: 1px solid var(--glass-border);
 }
 
 .app-header-inner {
@@ -96,10 +157,11 @@ a {
   font-weight: 700;
   font-size: 0.78em;
   letter-spacing: 0.02em;
-  color: var(--bg);
-  background: var(--accent);
+  color: #1a1200;
+  background: linear-gradient(135deg, #f3cf7a, var(--accent));
   border-radius: 6px;
   padding: 3px 7px;
+  box-shadow: 0 0 14px rgba(232, 184, 75, 0.35);
 }
 
 .brand-text {
@@ -127,12 +189,12 @@ a {
 
 .top-nav-link:hover {
   color: var(--text);
-  background: var(--surface);
+  background: var(--glass-bg-strong);
 }
 
 .top-nav-link.active {
-  color: var(--bg);
-  background: var(--accent);
+  color: #1a1200;
+  background: linear-gradient(135deg, #f3cf7a, var(--accent));
 }
 
 .header-meta {
@@ -154,8 +216,6 @@ a {
 .disclaimer {
   font-size: 0.76em;
   color: var(--text-faint);
-  background: var(--surface);
-  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 10px 14px;
   margin: 0 0 24px;
@@ -180,6 +240,25 @@ a {
   letter-spacing: -0.01em;
 }
 
+.section-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toggle-label {
+  font-size: 0.78em;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.toggle-label input {
+  accent-color: var(--accent);
+}
+
 .section-note {
   font-size: 0.82em;
   color: var(--text-muted);
@@ -198,31 +277,81 @@ a {
 }
 
 .ghost-button,
-.primary-button {
+.primary-button,
+.danger-button,
+.small-button {
   font-family: var(--font-ui);
   font-size: 0.85em;
   font-weight: 600;
   padding: 8px 16px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  border: 1px solid var(--border-strong);
-  background: var(--surface);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
   color: var(--text);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
-.ghost-button:hover {
-  background: var(--surface-raised);
+.ghost-button:hover,
+.small-button:hover {
+  background: var(--glass-bg-strong);
+  border-color: var(--glass-border-gold);
 }
 
 .primary-button {
   border: none;
-  background: var(--accent);
+  background: linear-gradient(135deg, #f3cf7a, var(--accent));
   color: #1a1200;
   padding: 12px;
   font-weight: 700;
+  box-shadow: 0 4px 16px rgba(232, 184, 75, 0.25);
 }
 
-.primary-button:disabled {
+.primary-button:hover {
+  filter: brightness(1.06);
+}
+
+.danger-button {
+  border: 1px solid rgba(240, 98, 95, 0.5);
+  background: rgba(240, 98, 95, 0.16);
+  color: #ff8d8a;
+  padding: 10px 18px;
+  font-weight: 700;
+}
+
+.danger-button:hover {
+  background: rgba(240, 98, 95, 0.26);
+}
+
+.small-button {
+  font-size: 0.78em;
+  padding: 6px 12px;
+}
+
+.small-button.sell-action {
+  color: var(--sell);
+  border-color: rgba(240, 98, 95, 0.45);
+}
+
+.small-button.cancel-action {
+  color: var(--text-muted);
+}
+
+.text-button {
+  align-self: flex-start;
+  font-family: var(--font-ui);
+  font-size: 0.74em;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.primary-button:disabled,
+.danger-button:disabled {
   opacity: 0.6;
   cursor: default;
 }
@@ -234,8 +363,7 @@ a {
 .no-data {
   color: var(--text-muted);
   font-size: 0.9em;
-  background: var(--surface);
-  border: 1px dashed var(--border-strong);
+  border-style: dashed;
   border-radius: var(--radius);
   padding: 22px;
   text-align: center;
@@ -251,6 +379,7 @@ a {
   padding: 3px 10px;
   border-radius: 999px;
   letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 
 .badge-buy { color: var(--buy); background: var(--buy-bg); }
@@ -260,6 +389,20 @@ a {
 .badge-risk-low { color: var(--risk-low); background: var(--risk-low-bg); }
 .badge-risk-medium { color: var(--risk-medium); background: var(--risk-medium-bg); }
 .badge-risk-high { color: var(--risk-high); background: var(--risk-high-bg); }
+
+.badge-soft {
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.badge-gold {
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.badge-win { color: var(--buy); background: var(--buy-bg); }
+.badge-lose { color: var(--sell); background: var(--sell-bg); }
+.badge-even { color: var(--hold); background: var(--hold-bg); }
 
 .positive { color: var(--buy); }
 .negative { color: var(--sell); }
@@ -297,9 +440,11 @@ a {
   display: block;
   text-decoration: none;
   color: inherit;
-  background: linear-gradient(135deg, rgba(240, 98, 95, 0.09), var(--surface) 55%);
+  background: linear-gradient(135deg, rgba(240, 98, 95, 0.12), rgba(255, 255, 255, 0.04) 60%);
   border: 1px solid rgba(240, 98, 95, 0.35);
   border-left: 3px solid var(--sell);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
   border-radius: var(--radius);
   padding: 14px 16px;
   margin-bottom: 8px;
@@ -327,8 +472,6 @@ a {
   display: flex;
   align-items: center;
   gap: 10px;
-  background: var(--surface);
-  border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px;
   color: var(--text-muted);
@@ -346,16 +489,14 @@ a {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 1px;
-  background: var(--border);
-  border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
   margin-bottom: 32px;
 }
 
 .stat-cell {
-  background: var(--surface);
   padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .stat-label {
@@ -379,25 +520,22 @@ a {
   /* Gridアイテムは既定でmin-width:autoのため、子要素に長い改行不可能なテキストが
      含まれると、このグリッド自体がビューポート幅を超えて広がり、
      モバイルブラウザがページ全体を縮小表示してしまうことがある。
-     グリッド自身をmin-width:0にしても子アイテム側の既定値には影響しないため、
      子アイテム(.rank-card等)側に個別でmin-width:0を指定して対処する。 */
   min-width: 0;
 }
 
 .rank-card {
   display: block;
-  min-width: 0; /* Gridアイテムの既定min-width:autoによる横方向オーバーフロー対策 */
+  min-width: 0;
   text-decoration: none;
   color: inherit;
-  background: var(--surface);
-  border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 15px;
   transition: border-color 0.15s ease, transform 0.15s ease;
 }
 
 .rank-card:hover {
-  border-color: var(--border-strong);
+  border-color: var(--glass-border-gold);
   transform: translateY(-1px);
 }
 
@@ -413,8 +551,8 @@ a {
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--glass-border);
   color: var(--text-faint);
   font-family: var(--font-mono);
   font-size: 0.72em;
@@ -471,8 +609,8 @@ a {
   grid-template-columns: repeat(3, 1fr);
   gap: 8px;
   padding: 10px 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--glass-border);
+  border-bottom: 1px solid var(--glass-border);
   margin-bottom: 9px;
 }
 
@@ -480,6 +618,7 @@ a {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 
 .metric-label {
@@ -514,18 +653,21 @@ a {
 
 .holding-card {
   display: block;
-  min-width: 0; /* Gridアイテムの既定min-width:autoによる横方向オーバーフロー対策(ホームのプレビューではcard-grid内に配置される) */
-  text-decoration: none;
+  min-width: 0;
   color: inherit;
-  background: var(--surface);
-  border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px;
   margin-bottom: 10px;
 }
 
 .holding-card:hover {
-  border-color: var(--border-strong);
+  border-color: var(--glass-border-gold);
+}
+
+.holding-card-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
 }
 
 .holding-card-top {
@@ -575,8 +717,8 @@ a {
   grid-template-columns: repeat(4, 1fr);
   gap: 10px;
   padding: 12px 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--glass-border);
+  border-bottom: 1px solid var(--glass-border);
   margin-bottom: 10px;
 }
 
@@ -588,24 +730,98 @@ a {
   gap: 6px;
 }
 
+.holding-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
 .action-hint-sell { color: var(--sell); font-weight: 700; }
 .action-hint-hold { color: var(--hold); font-weight: 700; }
 .action-hint-buy { color: var(--buy); font-weight: 700; }
+
+/* 保有銘柄カード内のAI評価の変化 */
+
+.eval-change {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--glass-border);
+}
+
+.eval-change-title {
+  font-size: 0.7em;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+  letter-spacing: 0.02em;
+}
+
+.eval-change-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.eval-step {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.eval-step-label {
+  font-size: 0.66em;
+  color: var(--text-faint);
+}
+
+.eval-step-body {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  font-weight: 700;
+}
+
+.eval-change-summary {
+  margin-top: 8px;
+  font-size: 0.76em;
+  color: var(--text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.delta-up { color: var(--buy); font-weight: 700; }
+.delta-down { color: var(--sell); font-weight: 700; }
+.delta-flat { color: var(--text-muted); font-weight: 700; }
 
 /* ---- 売買履歴カード ---- */
 
 .trade-card {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
-  background: var(--surface);
-  border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 13px 15px;
   margin-bottom: 8px;
-  text-decoration: none;
   color: inherit;
+}
+
+.trade-card.canceled {
+  opacity: 0.55;
+  border-style: dashed;
+}
+
+.trade-card.canceled .trade-card-pnl-value,
+.trade-card.canceled .stock-name {
+  text-decoration: line-through;
 }
 
 .trade-type-flag {
@@ -629,13 +845,18 @@ a {
   align-items: baseline;
   gap: 8px;
   margin-bottom: 3px;
+  flex-wrap: wrap;
+}
+
+.trade-card-title a {
+  text-decoration: none;
 }
 
 .trade-card-sub {
   font-size: 0.78em;
   color: var(--text-muted);
   display: flex;
-  gap: 12px;
+  gap: 4px 12px;
   flex-wrap: wrap;
 }
 
@@ -652,6 +873,53 @@ a {
 .trade-card-pnl-label {
   font-size: 0.68em;
   color: var(--text-faint);
+}
+
+.trade-card-actions {
+  margin-top: 6px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  align-items: center;
+}
+
+/* ---- 通算成績 ---- */
+
+.perf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.perf-cell {
+  border-radius: var(--radius);
+  padding: 13px 15px;
+  min-width: 0;
+}
+
+.perf-cell.highlight {
+  border-color: var(--glass-border-gold);
+  background: linear-gradient(135deg, rgba(232, 184, 75, 0.12), var(--glass-bg) 65%);
+}
+
+.perf-label {
+  font-size: 0.7em;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+
+.perf-value {
+  font-family: var(--font-mono);
+  font-size: 1.2em;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.perf-sub {
+  font-size: 0.7em;
+  color: var(--text-faint);
+  margin-top: 2px;
 }
 
 /* ---- 詳細画面 ---- */
@@ -671,8 +939,8 @@ a {
 .market-tag {
   font-size: 0.72em;
   color: var(--text-muted);
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
   border-radius: 999px;
   padding: 2px 10px;
 }
@@ -694,25 +962,31 @@ a {
   font-weight: 700;
   margin: 24px 0 10px;
   padding-bottom: 6px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--glass-border);
 }
 
 .chart-wrap {
-  background: var(--surface);
-  border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 10px 4px 8px;
 }
 
-.price-chart {
+.price-chart,
+.cum-chart,
+.score-chart {
   width: 100%;
   height: auto;
   display: block;
 }
 
 .chart-gridline {
-  stroke: var(--border);
+  stroke: rgba(255, 255, 255, 0.08);
   stroke-width: 1;
+}
+
+.chart-zero-line {
+  stroke: rgba(232, 184, 75, 0.45);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
 }
 
 .chart-axis-label {
@@ -733,6 +1007,30 @@ a {
 .price-chart.positive .chart-last-point { fill: var(--buy); }
 .price-chart.negative .chart-last-point { fill: var(--sell); }
 
+.cum-chart .chart-line,
+.score-chart .chart-line {
+  stroke: var(--accent);
+  stroke-width: 2.2;
+  stroke-linejoin: round;
+}
+
+.cum-chart .chart-area {
+  fill: url(#cum-gradient);
+}
+
+.cum-chart .chart-point {
+  fill: var(--accent);
+  stroke: rgba(10, 13, 18, 0.9);
+  stroke-width: 1.5;
+}
+
+.cum-chart .chart-point.win { fill: var(--buy); }
+.cum-chart .chart-point.lose { fill: var(--sell); }
+
+.score-chart .chart-point {
+  fill: var(--accent);
+}
+
 .chart-range-note {
   font-size: 0.72em;
   color: var(--text-faint);
@@ -741,8 +1039,6 @@ a {
 }
 
 .eval-block {
-  background: var(--surface);
-  border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 18px;
 }
@@ -764,8 +1060,8 @@ a {
   grid-template-columns: repeat(3, 1fr);
   gap: 12px;
   padding: 14px 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--glass-border);
+  border-bottom: 1px solid var(--glass-border);
   margin-bottom: 14px;
 }
 
@@ -793,11 +1089,80 @@ a {
   margin: 8px 0 0;
 }
 
+/* AI評価履歴 */
+
+.eval-compare {
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  font-size: 0.88em;
+}
+
+.eval-compare-arrow {
+  color: var(--text-faint);
+}
+
+.eval-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.eval-timeline-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border-radius: var(--radius);
+  padding: 11px 14px;
+}
+
+.eval-timeline-item.purchase {
+  border-color: var(--glass-border-gold);
+  box-shadow: var(--glass-shadow), 0 0 0 1px rgba(232, 184, 75, 0.12);
+}
+
+.eval-timeline-when {
+  min-width: 0;
+  font-size: 0.78em;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.eval-timeline-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.eval-timeline-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.eval-timeline-metrics {
+  font-family: var(--font-mono);
+  font-size: 0.8em;
+  color: var(--text-muted);
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 /* ---- 売買登録フォーム ---- */
 
 .trade-form {
-  background: var(--surface);
-  border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 18px;
   margin-bottom: 32px;
@@ -821,8 +1186,8 @@ a {
 .form-row input,
 .form-row select {
   font-family: var(--font-ui);
-  border: 1px solid var(--border-strong);
-  background: var(--bg-elevated);
+  border: 1px solid var(--glass-border);
+  background: rgba(0, 0, 0, 0.28);
   color: var(--text);
   border-radius: var(--radius-sm);
   padding: 9px 10px;
@@ -836,8 +1201,7 @@ a {
 }
 
 /* ダーク背景だとブラウザ既定のカレンダーアイコンが黒っぽく表示され見えなくなるため、
-   明るく反転させて視認・クリックできるようにする(Chrome/Edge等のChromium系ブラウザ向け)。
-   Firefoxはinput[type=date]の描画が異なりこのpseudo-elementを持たないため影響しない。 */
+   明るく反転させて視認・クリックできるようにする(Chrome/Edge等のChromium系ブラウザ向け)。 */
 .form-row input[type="date"]::-webkit-calendar-picker-indicator {
   filter: invert(0.85);
   cursor: pointer;
@@ -858,10 +1222,139 @@ a {
   grid-column: 1 / -1;
   margin: 0;
   font-size: 0.85em;
+  min-height: 0;
+}
+
+.form-message:empty {
+  display: none;
 }
 
 .form-message-success { color: var(--buy); }
 .form-message-error { color: var(--sell); }
+
+/* ---- モーダル ---- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 6, 10, 0.66);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+.modal-dialog {
+  position: relative;
+  width: 100%;
+  max-width: 460px;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  background: rgba(22, 28, 36, 0.78);
+  border: 1px solid var(--glass-border-gold);
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.modal-head h3 {
+  margin: 0;
+  font-size: 1.05em;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.5em;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.modal-close:hover {
+  color: var(--text);
+}
+
+.modal-info {
+  font-size: 0.88em;
+  margin-bottom: 14px;
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--glass-border);
+}
+
+.info-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal-preview {
+  font-size: 0.82em;
+  color: var(--text-muted);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(232, 184, 75, 0.07);
+  border: 1px solid rgba(232, 184, 75, 0.2);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.modal-actions .primary-button {
+  padding: 10px 18px;
+}
+
+.modal-warning {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 0.84em;
+  color: #ffb4b2;
+  background: rgba(240, 98, 95, 0.1);
+  border: 1px solid rgba(240, 98, 95, 0.3);
+}
+
+.modal-warning.neutral {
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--glass-border);
+}
 
 /* ---- フッター・下部ナビ ---- */
 
@@ -871,7 +1364,7 @@ a {
   padding: 0 20px 88px;
   font-size: 0.74em;
   color: var(--text-faint);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--glass-border);
   padding-top: 14px;
 }
 
@@ -902,9 +1395,10 @@ a {
     left: 0;
     right: 0;
     z-index: 20;
-    background: rgba(15, 20, 26, 0.96);
-    backdrop-filter: blur(10px);
-    border-top: 1px solid var(--border);
+    background: rgba(12, 16, 22, 0.72);
+    -webkit-backdrop-filter: blur(18px) saturate(150%);
+    backdrop-filter: blur(18px) saturate(150%);
+    border-top: 1px solid var(--glass-border);
     padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
   }
 
@@ -948,7 +1442,7 @@ a {
   }
 
   .trade-card {
-    grid-template-columns: auto 1fr;
+    grid-template-columns: auto minmax(0, 1fr);
     row-gap: 8px;
   }
 
@@ -958,15 +1452,50 @@ a {
     display: flex;
     align-items: baseline;
     gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .trade-card-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+    margin-top: 0;
   }
 
   .stats-strip {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .perf-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .eval-change-row {
+    grid-template-columns: 1fr;
+  }
+
+  .eval-timeline-item {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .eval-timeline-metrics {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 12px;
+    text-align: left;
+  }
+
+  .section-head {
+    flex-wrap: wrap;
   }
 }
 
 @media (max-width: 420px) {
   .holding-metrics {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .modal-dialog {
+    padding: 16px;
   }
 }

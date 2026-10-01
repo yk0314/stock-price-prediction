@@ -11,6 +11,16 @@
 // バインディング: wrangler.toml で STOCK_KV という名前のKV Namespace、
 // DBという名前のD1 Databaseをバインドしている前提。
 
+import {
+  buildHoldings,
+  buildPerformance,
+  buildTradeHistory,
+  computePositionFromTrades,
+  listHoldingCodes,
+  purchaseEvaluationIdByCode,
+  validateCancel,
+} from "./tradeLogic.mjs";
+
 const DEFAULT_RANKING_LIMIT = 20;
 const MAX_RANKING_LIMIT = 100;
 
@@ -68,8 +78,10 @@ function safeParseJsonArray(text) {
  */
 function mapEvaluationRow(row) {
   return {
+    id: row.id,
     code: row.code,
     name: row.stock_name ?? null,
+    source: row.source ?? null,
     score: row.score,
     rating: row.rating, // "BUY" | "HOLD" | "SELL"
     risk: row.risk, // "LOW" | "MEDIUM" | "HIGH"
@@ -90,7 +102,9 @@ function mapEvaluationRow(row) {
 }
 
 const EVALUATION_COLUMNS = `
+  ae.id,
   ae.code,
+  ae.source,
   s.name AS stock_name,
   ae.score,
   ae.rating,
@@ -197,177 +211,67 @@ async function fetchStockPricesFromD1(db, code) {
 
 // ---- 売買履歴(trades)・保有状況(holdings) ----
 // holdingsは別テーブルを持たず、tradesを時系列に集計して都度計算する（migrations/0001_init.sqlの
-// 設計コメント通り）。計算方式は移動平均法: 買うたびに平均取得価格を再計算し、
-// 売っても平均取得価格自体は変えず数量だけ減らす（証券会社の実務でも一般的な方式）。
-
-function mapTradeRow(row) {
-  return {
-    id: row.id,
-    code: row.code,
-    name: row.stock_name ?? null,
-    transactionType: row.transaction_type, // "buy" | "sell"
-    transactionDate: row.transaction_date,
-    quantity: row.quantity,
-    price: row.price,
-    amount: row.amount,
-    memo: row.memo ?? null,
-    purchaseEvaluationId: row.purchase_evaluation_id ?? null,
-    createdAt: row.created_at,
-  };
-}
+// 設計コメント通り）。計算ロジック(移動平均法・取消の検証・通算成績)は tradeLogic.mjs に集約している。
+// 取消済み(canceled_atが入っている)取引は、includeCanceled=trueを指定しない限り常に除外して取得する。
 
 /**
- * ある銘柄のtrades配列(時系列昇順)を移動平均法で順に処理し、各時点の状態を返す。
- * @returns {{
- *   quantity: number, avgCost: number,
- *   sellResults: Array<{tradeId:number, realizedPnl:number, realizedPnlPct:number, avgCostAtSale:number}>
- * }}
+ * trades行を取得し、stocks.nameをLEFT JOINして返す（生のDB行、まだ加工しない）。
  */
-function computePositionFromTrades(tradesForCodeAsc) {
-  let quantity = 0;
-  let avgCost = 0;
-  const sellResults = [];
-
-  for (const t of tradesForCodeAsc) {
-    if (t.transaction_type === "buy") {
-      const totalCost = avgCost * quantity + t.price * t.quantity;
-      quantity += t.quantity;
-      avgCost = quantity > 0 ? totalCost / quantity : 0;
-    } else if (t.transaction_type === "sell") {
-      const avgCostAtSale = avgCost;
-      const realizedPnl = (t.price - avgCostAtSale) * t.quantity;
-      const realizedPnlPct = avgCostAtSale > 0 ? (realizedPnl / (avgCostAtSale * t.quantity)) * 100 : null;
-      sellResults.push({ tradeId: t.id, realizedPnl, realizedPnlPct, avgCostAtSale });
-      quantity -= t.quantity;
-      // 移動平均法: 売却時に平均取得価格自体は変更しない
-    }
+async function fetchAllTradeRows(db, code, { includeCanceled = false } = {}) {
+  const conditions = [];
+  const binds = [];
+  if (code) {
+    conditions.push("t.code = ?");
+    binds.push(code);
   }
-
-  return { quantity, avgCost, sellResults };
-}
-
-/**
- * 全trades(どの銘柄のものも混在可)を銘柄ごとにグルーピングし、時系列昇順にソートする。
- * transaction_dateが同じ場合はid(登録順)で安定ソートする。
- */
-function groupTradesByCode(trades) {
-  const byCode = new Map();
-  for (const t of trades) {
-    if (!byCode.has(t.code)) byCode.set(t.code, []);
-    byCode.get(t.code).push(t);
+  if (!includeCanceled) {
+    conditions.push("t.canceled_at IS NULL");
   }
-  for (const list of byCode.values()) {
-    list.sort((a, b) => {
-      if (a.transaction_date !== b.transaction_date) {
-        return a.transaction_date < b.transaction_date ? -1 : 1;
-      }
-      return a.id - b.id;
-    });
-  }
-  return byCode;
-}
-
-/**
- * 全trades行を取得し、stocks.nameをLEFT JOINして返す（生のDB行、まだ加工しない）。
- */
-async function fetchAllTradeRows(db, code) {
-  const query = code
-    ? db
-        .prepare(
-          `SELECT t.*, s.name AS stock_name
-           FROM trades t
-           LEFT JOIN stocks s ON s.code = t.code
-           WHERE t.code = ?
-           ORDER BY t.transaction_date ASC, t.id ASC`
-        )
-        .bind(code)
-    : db.prepare(
-        `SELECT t.*, s.name AS stock_name
-         FROM trades t
-         LEFT JOIN stocks s ON s.code = t.code
-         ORDER BY t.transaction_date ASC, t.id ASC`
-      );
-  const { results } = await query.all();
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const statement = db.prepare(
+    `SELECT t.*, s.name AS stock_name
+     FROM trades t
+     LEFT JOIN stocks s ON s.code = t.code
+     ${where}
+     ORDER BY t.transaction_date ASC, t.id ASC`
+  );
+  const { results } = await (binds.length > 0 ? statement.bind(...binds) : statement).all();
   return results ?? [];
 }
 
 /**
- * GET /api/trades のレスポンスを組み立てる。
- * BUY行には「このロットを今も持っていたら」の含み損益（現在価格との差、1ロット単位）を、
- * SELL行には移動平均法で計算した実現損益・勝敗フラグを付与する。
- * currentPriceByCode が無い銘柄（KVのstocks一覧に無い等）は損益をnullのまま返す。
+ * 指定した1銘柄のai_evaluationsを新しい順(id降順)に最大limit件取得する。
+ * 保有銘柄の「最新評価・前回評価」と、銘柄ごとのAI評価履歴の両方で使う。
  */
-function buildTradeHistory(allTradeRows, currentPriceByCode) {
-  const byCode = groupTradesByCode(allTradeRows);
-  const resultsByTradeId = new Map();
-
-  for (const [code, tradesAsc] of byCode.entries()) {
-    const { sellResults } = computePositionFromTrades(tradesAsc);
-    const sellResultByTradeId = new Map(sellResults.map((r) => [r.tradeId, r]));
-    const currentPrice = currentPriceByCode.get(code) ?? null;
-
-    for (const t of tradesAsc) {
-      const base = mapTradeRow(t);
-      if (t.transaction_type === "buy") {
-        const pnl = currentPrice !== null ? (currentPrice - t.price) * t.quantity : null;
-        const pnlPct = currentPrice !== null && t.price > 0 ? ((currentPrice - t.price) / t.price) * 100 : null;
-        resultsByTradeId.set(t.id, {
-          ...base,
-          pnl,
-          pnlPct,
-          pnlType: "unrealized", // このロットを今も保有していたと仮定した含み損益（実際の保有数とは独立）
-          win: null,
-        });
-      } else {
-        const sellResult = sellResultByTradeId.get(t.id);
-        resultsByTradeId.set(t.id, {
-          ...base,
-          pnl: sellResult?.realizedPnl ?? null,
-          pnlPct: sellResult?.realizedPnlPct ?? null,
-          pnlType: "realized",
-          win: sellResult ? sellResult.realizedPnl > 0 : null,
-        });
-      }
-    }
-  }
-
-  // 元の(全銘柄混在の)時系列順ではなく、新しい取引から見たいことが多いのでtransaction_date降順で返す
-  return allTradeRows
-    .map((t) => resultsByTradeId.get(t.id))
-    .sort((a, b) => {
-      if (a.transactionDate !== b.transactionDate) return a.transactionDate < b.transactionDate ? 1 : -1;
-      return b.id - a.id;
-    });
+async function fetchRecentEvaluationsForCode(db, code, limit) {
+  const { results } = await db
+    .prepare(
+      `SELECT ${EVALUATION_COLUMNS}
+       FROM ai_evaluations ae
+       LEFT JOIN stocks s ON s.code = ae.code
+       WHERE ae.code = ?
+       ORDER BY ae.id DESC
+       LIMIT ?`
+    )
+    .bind(code, limit)
+    .all();
+  return (results ?? []).map(mapEvaluationRow);
 }
 
 /**
- * GET /api/holdings のレスポンスを組み立てる。保有数量が0より大きい銘柄のみ返す。
+ * ai_evaluationsをid指定で1件取得する(無ければnull)。購入時AI評価の取得に使う。
  */
-function buildHoldings(allTradeRows, currentPriceByCode, nameByCode, latestEvaluationByCode) {
-  const byCode = groupTradesByCode(allTradeRows);
-  const holdings = [];
-
-  for (const [code, tradesAsc] of byCode.entries()) {
-    const { quantity, avgCost } = computePositionFromTrades(tradesAsc);
-    if (quantity <= 0) continue;
-
-    const currentPrice = currentPriceByCode.get(code) ?? null;
-    const unrealizedPnl = currentPrice !== null ? (currentPrice - avgCost) * quantity : null;
-    const unrealizedPnlPct = currentPrice !== null && avgCost > 0 ? ((currentPrice - avgCost) / avgCost) * 100 : null;
-
-    holdings.push({
-      code,
-      name: nameByCode.get(code) ?? null,
-      quantity,
-      avgCost,
-      currentPrice,
-      unrealizedPnl,
-      unrealizedPnlPct,
-      latestEvaluation: latestEvaluationByCode.get(code) ?? null,
-    });
-  }
-
-  return holdings.sort((a, b) => (b.unrealizedPnl ?? -Infinity) - (a.unrealizedPnl ?? -Infinity));
+async function fetchEvaluationById(db, id) {
+  const row = await db
+    .prepare(
+      `SELECT ${EVALUATION_COLUMNS}
+       FROM ai_evaluations ae
+       LEFT JOIN stocks s ON s.code = ae.code
+       WHERE ae.id = ?`
+    )
+    .bind(id)
+    .first();
+  return row ? mapEvaluationRow(row) : null;
 }
 
 /**
@@ -470,6 +374,46 @@ async function handleCreateTrade(db, kv, body) {
       memo: memo ?? null,
       purchaseEvaluationId,
       createdAt,
+    },
+  };
+}
+
+/**
+ * POST /api/trades/:id/cancel を処理する(論理取消。物理DELETEはしない)。
+ * - すでに取消済みの取引は409。
+ * - SELLの取消は常に可能(保有数量・平均取得価格は、取消済みを除いた取引から再計算される)。
+ * - BUYの取消は、そのBUYを除くと後続のSELLが保有数量を超える場合は409で拒否する。
+ * 保有数量・平均取得価格・損益・通算成績は保存された値を持たず、常に取消されていない取引から
+ * 計算するため、ここでは canceled_at を設定するだけで再計算は自動的に反映される。
+ */
+async function handleCancelTrade(db, tradeId) {
+  const target = await db.prepare(`SELECT id, code FROM trades WHERE id = ?`).bind(tradeId).first();
+  if (!target) {
+    return { status: 404, body: { error: "取消対象の取引が見つかりません。" } };
+  }
+
+  const rowsForCode = await fetchAllTradeRows(db, target.code, { includeCanceled: true });
+  const verdict = validateCancel(rowsForCode, tradeId);
+  if (!verdict.ok) {
+    return { status: verdict.status, body: { error: verdict.error } };
+  }
+
+  const canceledAt = new Date().toISOString();
+  const result = await db
+    .prepare(`UPDATE trades SET canceled_at = ? WHERE id = ? AND canceled_at IS NULL`)
+    .bind(canceledAt, tradeId)
+    .run();
+  if (result.meta && result.meta.changes === 0) {
+    return { status: 409, body: { error: "この取引はすでに取り消されています。" } };
+  }
+
+  return {
+    status: 200,
+    body: {
+      id: tradeId,
+      code: target.code,
+      transactionType: verdict.target.transaction_type,
+      canceledAt,
     },
   };
 }
@@ -585,6 +529,22 @@ export default {
         }
       }
 
+      // GET /api/stocks/:code/evaluations — 銘柄ごとのAI評価履歴(ai_evaluationsは追記専用のため全履歴が残っている)。
+      // 新しい順。?limit= で件数指定(既定50件、上限200件)。
+      const evaluationsMatch = path.match(/^\/api\/stocks\/([^/]+)\/evaluations$/);
+      if (evaluationsMatch) {
+        if (!env.DB) return jsonResponse([]);
+        const code = evaluationsMatch[1];
+        const limitParam = Number.parseInt(url.searchParams.get("limit"), 10);
+        const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 200) : 50;
+        try {
+          return jsonResponse(await fetchRecentEvaluationsForCode(env.DB, code, limit));
+        } catch (err) {
+          console.error(`[worker] /api/stocks/:code/evaluations D1クエリ失敗 code=${code}: ${err.message}`);
+          return errorResponse(500);
+        }
+      }
+
       // GET /api/stocks/:code — 個別銘柄の詳細（KVの基本情報 + D1の最新AI評価をまとめて返す）
       // 基本情報(code/name/market/price/dataAsOf)は従来通りKVのstocks一覧から取得する
       // （全銘柄分を含む一覧なので、Gemini未分析の銘柄でもここは取れる）。
@@ -678,31 +638,59 @@ export default {
         }
       }
 
+      // POST /api/trades/:id/cancel — 売買取引の取消(論理取消)。BUY/SELLどちらも取り消せる。
+      const cancelMatch = path.match(/^\/api\/trades\/(\d+)\/cancel$/);
+      if (cancelMatch && request.method === "POST") {
+        if (!env.DB) {
+          return jsonResponse({ error: "D1が接続されていないため取消できません。" }, 500);
+        }
+        try {
+          const { status, body: responseBody } = await handleCancelTrade(env.DB, Number(cancelMatch[1]));
+          return jsonResponse(responseBody, status);
+        } catch (err) {
+          console.error(`[worker] POST /api/trades/:id/cancel 失敗: ${err.message}`);
+          return errorResponse(500);
+        }
+      }
+
+      // GET /api/trades/summary — 通算成績(確定したSELLのみ。取消済みは除外)と累計確定損益の推移。
+      if (path === "/api/trades/summary" && request.method === "GET") {
+        if (!env.DB) return jsonResponse(buildPerformance([]));
+        try {
+          const allTradeRows = await fetchAllTradeRows(env.DB);
+          return jsonResponse(buildPerformance(allTradeRows));
+        } catch (err) {
+          console.error(`[worker] GET /api/trades/summary 失敗: ${err.message}`);
+          return errorResponse(500);
+        }
+      }
+
       // GET /api/trades — 売買履歴一覧（?code=で銘柄絞り込み可）。
-      // BUY行には現在価格との含み損益、SELL行には移動平均法で計算した実現損益・勝敗を付与する。
+      // BUY行には現在価格との含み損益、SELL行には移動平均法で計算した実現損益・勝敗・売却時平均取得価格を付与する。
+      // 取消済みの取引は既定では含めない。?includeCanceled=1 で canceled:true として含める。
       if (path === "/api/trades" && request.method === "GET") {
         if (!env.DB) return jsonResponse([]);
         try {
           const codeFilter = url.searchParams.get("code") || undefined;
-          const [allTradeRows, { priceByCode, nameByCode }] = await Promise.all([
-            fetchAllTradeRows(env.DB, codeFilter),
+          const includeCanceled = url.searchParams.get("includeCanceled") === "1";
+          const [allTradeRows, { priceByCode }] = await Promise.all([
+            fetchAllTradeRows(env.DB, codeFilter, { includeCanceled }),
             buildStockLookupMaps(env.STOCK_KV),
           ]);
           // buildTradeHistoryは銘柄ごとの移動平均計算のために「その銘柄の全履歴」が必要なため、
           // ?codeで絞り込んでいてもfetchAllTradeRows自体はcode指定のWHERE句で完結しており問題ない
           // （他銘柄の履歴が無くても、その銘柄1つの計算は正しく行える）。
-          const history = buildTradeHistory(allTradeRows, priceByCode);
-          void nameByCode; // buildTradeHistoryはstocks.nameをSQL側のJOINで既に取得済みのため未使用
-          return jsonResponse(history);
+          return jsonResponse(buildTradeHistory(allTradeRows, priceByCode, { includeCanceled }));
         } catch (err) {
           console.error(`[worker] GET /api/trades 失敗: ${err.message}`);
           return errorResponse(500);
         }
       }
 
-      // GET /api/holdings — 現在の保有銘柄一覧（保有数量>0の銘柄のみ）。
+      // GET /api/holdings — 現在の保有銘柄一覧（保有数量>0の銘柄のみ。取消済みの取引は除外して計算）。
       // 保有数量・平均取得価格はtradesから移動平均法でその都度計算する（別テーブルは持たない）。
-      // 各銘柄の最新AI評価も併せて返す（保有判断の参考用。銘柄ごとにid最大値=最新1件）。
+      // 各銘柄の最新AI評価(latestEvaluation)に加えて、その1つ前の評価(previousEvaluation)と
+      // 購入時AI評価(purchaseEvaluation: 最新のBUYのpurchase_evaluation_id)も返す。
       if (path === "/api/holdings") {
         if (!env.DB) return jsonResponse([]);
         try {
@@ -710,14 +698,28 @@ export default {
             fetchAllTradeRows(env.DB),
             buildStockLookupMaps(env.STOCK_KV),
           ]);
-          const holdingCodes = [...groupTradesByCode(allTradeRows).entries()]
-            .filter(([, trades]) => computePositionFromTrades(trades).quantity > 0)
-            .map(([code]) => code);
+          const holdingCodes = listHoldingCodes(allTradeRows);
           const evaluationEntries = await Promise.all(
-            holdingCodes.map(async (code) => [code, await fetchLatestEvaluationForCode(env.DB, code)])
+            holdingCodes.map(async (code) => {
+              const recent = await fetchRecentEvaluationsForCode(env.DB, code, 2);
+              return [code, { latest: recent[0] ?? null, previous: recent[1] ?? null }];
+            })
           );
-          const latestEvaluationByCode = new Map(evaluationEntries);
-          const holdings = buildHoldings(allTradeRows, priceByCode, nameByCode, latestEvaluationByCode);
+          const evaluationsByCode = new Map(evaluationEntries);
+
+          const purchaseIds = [
+            ...new Set(
+              [...purchaseEvaluationIdByCode(allTradeRows).values()]
+                .map((v) => v.purchaseEvaluationId)
+                .filter((id) => id)
+            ),
+          ];
+          const purchaseEntries = await Promise.all(
+            purchaseIds.map(async (id) => [id, await fetchEvaluationById(env.DB, id)])
+          );
+          const purchaseEvaluationById = new Map(purchaseEntries);
+
+          const holdings = buildHoldings(allTradeRows, priceByCode, nameByCode, evaluationsByCode, purchaseEvaluationById);
           return jsonResponse(holdings);
         } catch (err) {
           console.error(`[worker] GET /api/holdings 失敗: ${err.message}`);

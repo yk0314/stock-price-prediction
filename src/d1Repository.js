@@ -156,14 +156,18 @@ export async function saveAiEvaluationsToD1(d1, evaluations) {
 
 /**
  * 現在保有中(数量>0)の銘柄コード一覧を取得する。
- * worker/src/index.jsのcomputePositionFromTrades()と同じ移動平均法のロジックを、
+ * worker/src/tradeLogic.mjsのcomputePositionFromTrades()と同じ移動平均法のロジックを、
  * GitHub Actions側(REST APIクライアントのd1.js経由)向けに実装したもの
  * （env.DBネイティブバインディングが使えないGitHub Actions環境向けの複製。
  *  ロジック自体は完全に同一である必要があるため、変更する場合は両方を揃えること）。
+ *
+ * 取消済み(canceled_atが入っている)取引は、保有数量の計算から除外する。
+ * （誤登録のBUYを取り消した銘柄を、保有銘柄として再評価し続けないため。
+ *  誤登録のSELLを取り消した場合は、その銘柄が保有銘柄として復元される。）
  */
 export async function fetchHeldCodes(d1) {
   const rows = await d1.query(
-    `SELECT code, transaction_type, transaction_date, quantity, price, id FROM trades ORDER BY transaction_date ASC, id ASC`
+    `SELECT code, transaction_type, transaction_date, quantity, price, id FROM trades WHERE canceled_at IS NULL ORDER BY transaction_date ASC, id ASC`
   );
 
   const byCode = new Map();

@@ -74,16 +74,25 @@
         <h2>保有銘柄</h2>
         <button id="holdings-reload" class="ghost-button" title="再読み込み">更新</button>
       </div>
-      <p class="section-note">取得日時が新しい順に表示しています。</p>
+      <p class="section-note">取得日時が新しい順に表示しています。売却した内容は「売却（SELL登録）」から記録できます。</p>
+      <p id="holdings-message" class="form-message" role="status"></p>
       <div id="holdings-list" aria-live="polite">読み込み中...</div>
     </section>
 
     <!-- 売買履歴 -->
     <section id="view-trades" class="view" hidden>
       <div class="section-head">
+        <h2>通算成績</h2>
+        <button id="performance-reload" class="ghost-button" title="再読み込み">更新</button>
+      </div>
+      <p class="section-note">売却が確定した取引のみの集計です（含み損益・取消済みの取引は含みません）。</p>
+      <div id="performance-summary" aria-live="polite">読み込み中...</div>
+      <div id="performance-chart"></div>
+
+      <div class="section-head">
         <h2>売買を記録</h2>
       </div>
-      <form id="trade-form" class="trade-form">
+      <form id="trade-form" class="trade-form glass">
         <div class="form-row">
           <label for="trade-code">銘柄コード</label>
           <input type="text" id="trade-code" required placeholder="例: 7203" />
@@ -117,8 +126,12 @@
 
       <div class="section-head">
         <h2>売買履歴</h2>
-        <button id="trades-reload" class="ghost-button" title="再読み込み">更新</button>
+        <div class="section-head-actions">
+          <label class="toggle-label"><input type="checkbox" id="trades-show-canceled" /> 取消済みも表示</label>
+          <button id="trades-reload" class="ghost-button" title="再読み込み">更新</button>
+        </div>
       </div>
+      <p id="trades-message" class="form-message" role="status"></p>
       <div id="trades-list" aria-live="polite">読み込み中...</div>
     </section>
   </main>
@@ -144,6 +157,60 @@
       <span class="bottom-nav-icon">✎</span><span>履歴</span>
     </a>
   </nav>
+
+  <!-- 売却(SELL登録)モーダル -->
+  <div id="sell-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="sell-modal-title">
+    <div class="modal-backdrop" data-modal-close></div>
+    <div class="modal-dialog glass">
+      <div class="modal-head">
+        <h3 id="sell-modal-title">売却を登録（SELL）</h3>
+        <button type="button" class="modal-close" data-modal-close aria-label="閉じる">×</button>
+      </div>
+      <div id="sell-modal-info" class="modal-info"></div>
+      <form id="sell-form" class="modal-form">
+        <div class="form-row">
+          <label for="sell-quantity">売却数量（株）</label>
+          <input type="number" id="sell-quantity" required min="1" step="1" />
+          <button type="button" id="sell-quantity-all" class="text-button">全数量を入れる</button>
+        </div>
+        <div class="form-row">
+          <label for="sell-price">売却価格（円）</label>
+          <input type="number" id="sell-price" required min="0" step="0.1" />
+        </div>
+        <div class="form-row">
+          <label for="sell-date">約定日</label>
+          <input type="date" id="sell-date" required />
+        </div>
+        <div class="form-row">
+          <label for="sell-memo">メモ（任意）</label>
+          <input type="text" id="sell-memo" placeholder="例: 目標価格に到達" />
+        </div>
+        <div id="sell-preview" class="modal-preview"></div>
+        <p id="sell-form-message" class="form-message" role="alert"></p>
+        <div class="modal-actions">
+          <button type="button" class="ghost-button" data-modal-close>キャンセル</button>
+          <button type="submit" id="sell-submit" class="primary-button">売却を登録する</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 取消確認モーダル -->
+  <div id="cancel-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="cancel-modal-title">
+    <div class="modal-backdrop" data-modal-close></div>
+    <div class="modal-dialog glass">
+      <div class="modal-head">
+        <h3 id="cancel-modal-title">取引を取り消しますか？</h3>
+        <button type="button" class="modal-close" data-modal-close aria-label="閉じる">×</button>
+      </div>
+      <div id="cancel-modal-body" class="modal-info"></div>
+      <p id="cancel-modal-message" class="form-message" role="alert"></p>
+      <div class="modal-actions">
+        <button type="button" class="ghost-button" data-modal-close>やめる</button>
+        <button type="button" id="cancel-confirm" class="danger-button">取り消す</button>
+      </div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>
