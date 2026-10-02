@@ -1,9 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
 
-// public/orderAssist.js は通常スクリプト(<script>)として読み込む想定のため、importすると globalThis.OrderAssist が定義される
-await import("../public/orderAssist.js");
-const { calcBuyPlan, calcSellPlan, buildOrderRows, buildOrderText } = globalThis.OrderAssist;
+// OrderAssist(計算の純粋関数)は public/app.js の「ORDER-ASSIST:BEGIN 〜 ORDER-ASSIST:END」の間にある。
+// 画面(ブラウザ)で実際に動くコードそのものを取り出してテストする(別ファイルのコピーはテストしない)。
+const appSource = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+const begin = appSource.indexOf("/* ORDER-ASSIST:BEGIN");
+const end = appSource.indexOf("/* ORDER-ASSIST:END */");
+assert.ok(begin >= 0 && end > begin, "app.js に ORDER-ASSIST のブロックがありません");
+const OrderAssist = vm.runInNewContext(`${appSource.slice(begin, end)}\n;OrderAssist`);
+const { calcBuyPlan, calcSellPlan, buildOrderRows, buildOrderText } = OrderAssist;
 
 // ---- BUY ----
 

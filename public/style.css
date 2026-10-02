@@ -1635,3 +1635,9 @@ a {
     font-size: 0.98em;
   }
 }
+
+.small-button.buy-action {
+  color: var(--buy);
+  border-color: rgba(52, 211, 153, 0.45);
+  min-width: 72px;
+}
