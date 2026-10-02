@@ -136,6 +136,87 @@ function setMessage(el, text, kind) {
   el.className = "form-message" + (kind === "success" ? " form-message-success" : kind === "error" ? " form-message-error" : "");
 }
 
+// ---- SBI発注補助(手動発注のための計算・表示。注文の自動送信は一切行わない) ----
+
+const OA = globalThis.OrderAssist; // orderAssist.js(純粋関数)
+const buyAssistSources = new Map(); // code -> BUY発注補助に使うデータ(ランキング・詳細画面で登録)
+const currentOrderText = { buy: "", sell: "" }; // 「注文内容をコピー」でコピーするテキスト
+const BUY_BUDGET_STORAGE_KEY = "orderAssist.buyBudget";
+const DEFAULT_BUY_BUDGET = 50000;
+let buyAssistTarget = null;
+let pendingTradePrefill = null;
+
+function formatYenExact(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
+  return `¥${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+function priceFreshnessNote(priceAsOf) {
+  return `株価はデータ基準日（${esc(priceAsOf ?? "不明")}）時点の値で、リアルタイム価格ではありません。発注前にSBI証券で最新の株価をご確認ください。`;
+}
+
+function assistTile(label, valueHtml, { primary = false } = {}) {
+  return `<div class="assist-tile${primary ? " primary" : ""}"><div class="assist-tile-label">${label}</div><div class="assist-tile-value num">${valueHtml}</div></div>`;
+}
+
+/**
+ * 「SBI証券で注文する場合」の注文内容カード。画面表示とコピー用テキストは同じデータ(OA.buildOrderRows)から作る。
+ * コピーしても、クリップボードに文字が入るだけで注文は一切実行されない。
+ */
+function renderOrderCard(kind, order) {
+  currentOrderText[kind] = OA.buildOrderText(order);
+  const rows = OA.buildOrderRows(order)
+    .map(([label, value]) => `<div class="assist-order-row"><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`)
+    .join("");
+  return `
+    <div class="assist-order">
+      <div class="assist-order-head">
+        <span>SBI証券で注文する場合</span>
+        <button type="button" class="small-button" data-action="copy-order" data-kind="${kind}">注文内容をコピー</button>
+      </div>
+      <dl class="assist-order-list">${rows}</dl>
+      <p class="assist-note">コピーしても注文は実行されません。注文はSBI証券の画面で、ご自身で入力してください。</p>
+    </div>`;
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // フォールバックへ
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest('[data-action="copy-order"]');
+  if (!btn) return;
+  const text = currentOrderText[btn.dataset.kind];
+  if (!text) return;
+  const ok = await copyText(text);
+  if (btn.dataset.label === undefined) btn.dataset.label = btn.textContent;
+  btn.textContent = ok ? "コピーしました" : "コピーできませんでした";
+  setTimeout(() => {
+    btn.textContent = btn.dataset.label;
+  }, 1800);
+});
+
 // ---- AI評価の比較(購入時→現在、前回→現在) ----
 
 const RATING_ORDER = { BUY: 0, HOLD: 1, SELL: 2 };
@@ -397,8 +478,23 @@ function renderMeta(meta) {
 }
 
 function renderRankingCard(item, rank) {
+  if (item.rating === "BUY") {
+    // BUY発注補助(ボタン)で使うデータ。株価はAI評価時点(=データ基準日)の株価
+    buyAssistSources.set(item.code, {
+      code: item.code,
+      name: item.name,
+      price: item.priceAtEvaluation,
+      priceAsOf: item.dataAsOfDate,
+      rating: item.rating,
+      score: item.score,
+      risk: item.risk,
+      expectedReturn: item.expectedReturn,
+      expectedHoldingDays: item.expectedHoldingDays,
+    });
+  }
   return `
-    <a class="rank-card" href="#/stock/${encodeURIComponent(item.code)}" data-code="${item.code}">
+    <div class="rank-card" data-code="${item.code}">
+      <a class="rank-card-link" href="#/stock/${encodeURIComponent(item.code)}">
       <div class="rank-card-top">
         <span class="rank-number">${rank}</span>
         <div class="rank-card-title">
@@ -427,7 +523,13 @@ function renderRankingCard(item, rank) {
       </div>
       ${item.summary ? `<p class="rank-card-summary">${esc(item.summary)}</p>` : ""}
       <div class="meta-line">評価日: ${item.evaluationDate ?? "-"} ／ データ基準日: ${item.dataAsOfDate ?? "-"}</div>
-    </a>
+      </a>
+      ${
+        item.rating === "BUY"
+          ? `<div class="rank-card-actions"><button type="button" class="small-button" data-action="buy-assist" data-code="${item.code}">SBI発注補助（買い）</button></div>`
+          : ""
+      }
+    </div>
   `;
 }
 
@@ -699,6 +801,21 @@ async function loadDetail(code) {
       (trades ?? []).filter((t) => t.transactionType === "buy" && t.purchaseEvaluationId).map((t) => t.purchaseEvaluationId)
     );
 
+    const latestEval = stock.latestEvaluation;
+    if (latestEval && latestEval.rating === "BUY") {
+      buyAssistSources.set(stock.code, {
+        code: stock.code,
+        name: stock.name,
+        price: stock.price,
+        priceAsOf: stock.dataAsOf,
+        rating: latestEval.rating,
+        score: latestEval.score,
+        risk: latestEval.risk,
+        expectedReturn: latestEval.expectedReturn,
+        expectedHoldingDays: latestEval.expectedHoldingDays,
+      });
+    }
+
     el.innerHTML = `
       <div class="detail-header">
         <span class="stock-code">${stock.code}</span>
@@ -714,6 +831,11 @@ async function loadDetail(code) {
       ${renderPriceChart(prices)}
 
       <h3 class="detail-subhead">AI評価</h3>
+      ${
+        latestEval && latestEval.rating === "BUY"
+          ? `<div class="assist-cta"><button type="button" class="small-button" data-action="buy-assist" data-code="${stock.code}">SBI発注補助（買い）</button><span class="meta-line">購入株数と注文内容を計算します（注文は送信されません）</span></div>`
+          : ""
+      }
       ${renderEvaluationBlock(stock.latestEvaluation)}
 
       <h3 class="detail-subhead">AI評価の履歴</h3>
@@ -818,8 +940,8 @@ function renderHoldingCard(h, acquisitionDate, { detailed = true } = {}) {
       ${
         detailed
           ? `<div class="holding-actions">
-               <span class="meta-line">売却したら、ここから約定内容を記録します。</span>
-               <button type="button" class="small-button sell-action" data-action="sell" data-code="${h.code}">売却（SELL登録）</button>
+               <span class="meta-line">売却株数・想定損益を確認して、SBI証券で手動注文できます。</span>
+               <button type="button" class="small-button sell-action" data-action="sell" data-code="${h.code}">SBI売却補助</button>
              </div>`
           : ""
       }
@@ -850,21 +972,25 @@ let sellTarget = null;
 function openSellModal(code) {
   const h = currentHoldings.find((x) => x.code === code);
   if (!h) return;
+  if (!(h.quantity > 0)) return; // 保有株数が0の銘柄にはSELL補助を表示しない
   sellTarget = h;
 
   const pnlPct = h.unrealizedPnlPct !== null ? Math.round(h.unrealizedPnlPct * 10) / 10 : null;
+  const ev = h.latestEvaluation;
   document.getElementById("sell-modal-info").innerHTML = `
     <div class="info-title">
       <span class="stock-code">${h.code}</span>
       <strong>${esc(h.name ?? "銘柄名未取得")}</strong>
     </div>
     <div class="info-grid">
-      <div class="metric"><span class="metric-label">保有数量</span><span class="metric-value num">${h.quantity.toLocaleString()}株</span></div>
-      <div class="metric"><span class="metric-label">平均取得価格</span><span class="metric-value num">${formatYen(h.avgCost)}</span></div>
-      <div class="metric"><span class="metric-label">現在価格（データ基準日時点）</span><span class="metric-value num">${yenOrDash(h.currentPrice)}</span></div>
+      <div class="metric"><span class="metric-label">保有株数</span><span class="metric-value num">${h.quantity.toLocaleString()}株</span></div>
+      <div class="metric"><span class="metric-label">平均取得単価</span><span class="metric-value num">${formatYenExact(h.avgCost)}</span></div>
+      <div class="metric"><span class="metric-label">現在株価</span><span class="metric-value num">${yenOrDash(h.currentPrice)}</span></div>
       <div class="metric"><span class="metric-label">現在の含み損益</span><span class="metric-value num ${percentClass(h.unrealizedPnl)}">${signedYenOrDash(h.unrealizedPnl)}${pnlPct !== null ? `（${formatPercent(pnlPct)}）` : ""}</span></div>
+      <div class="metric"><span class="metric-label">AI評価</span><span class="metric-value">${ev ? ratingBadge(ev.rating) : "—"}</span></div>
+      <div class="metric"><span class="metric-label">スコア</span><span class="metric-value num">${ev ? (ev.score ?? "-") : "—"}</span></div>
     </div>
-    <p class="meta-line">売却価格には、実際にSBI証券等で約定した価格を入力してください。</p>
+    <p class="assist-note">${h.currentPrice !== null && h.currentPrice !== undefined ? priceFreshnessNote(h.priceAsOf) : "現在株価を取得できていません。売却価格は、SBI証券で確認した価格を入力してください。"}</p>
   `;
 
   const qty = document.getElementById("sell-quantity");
@@ -882,25 +1008,42 @@ function openSellModal(code) {
   showModal("sell-modal");
 }
 
+/** 売却株数・売却価格から、売却予定金額・取得原価・想定損益・想定リターンとSBI注文内容を表示する。 */
 function updateSellPreview() {
-  const el = document.getElementById("sell-preview");
+  const previewEl = document.getElementById("sell-preview");
+  const orderEl = document.getElementById("sell-order-card");
   if (!sellTarget) {
-    el.textContent = "";
+    previewEl.innerHTML = "";
+    orderEl.innerHTML = "";
     return;
   }
-  const quantity = Number(document.getElementById("sell-quantity").value);
-  const price = Number(document.getElementById("sell-price").value);
-  if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(price) || price <= 0) {
-    el.textContent = "数量と売却価格を入力すると、見込みの確定損益を表示します。";
+  const plan = OA.calcSellPlan({
+    quantity: Number(document.getElementById("sell-quantity").value),
+    price: Number(document.getElementById("sell-price").value),
+    holdingQuantity: sellTarget.quantity,
+    avgCost: sellTarget.avgCost,
+  });
+  if (!plan.ok) {
+    previewEl.innerHTML = `<div class="assist-error">${esc(plan.message)}</div>`;
+    orderEl.innerHTML = "";
+    currentOrderText.sell = "";
     return;
   }
-  const pnl = (price - sellTarget.avgCost) * quantity;
-  const pct = sellTarget.avgCost > 0 ? (pnl / (sellTarget.avgCost * quantity)) * 100 : null;
-  const remaining = sellTarget.quantity - quantity;
-  el.innerHTML =
-    `見込みの確定損益: <strong class="num ${percentClass(pnl)}">${formatSignedYen(pnl)}</strong>（${fmtPct(pct)}） ／ ` +
-    `売却後の保有数量: <strong class="num">${remaining.toLocaleString()}株</strong>` +
-    (remaining === 0 ? "（全数量の売却）" : remaining < 0 ? "（保有数量を超えています）" : "（一部売却）");
+  previewEl.innerHTML = `
+    <div class="assist-tiles">
+      ${assistTile("売却予定金額", formatYenExact(plan.proceeds))}
+      ${assistTile("取得原価", formatYenExact(plan.costBasis))}
+      ${assistTile("想定損益", `<span class="${percentClass(plan.pnl)}">${formatSignedYen(plan.pnl)}</span>`, { primary: true })}
+      ${assistTile("想定リターン", `<span class="${percentClass(plan.returnPct)}">${fmtPct(plan.returnPct)}</span>`, { primary: true })}
+    </div>
+    <p class="assist-note">平均取得単価（${formatYenExact(sellTarget.avgCost)}）で計算した想定値です。売却後の保有株数: ${plan.remaining.toLocaleString()}株${plan.isFullSale ? "（全株売却）" : "（一部売却）"}</p>
+  `;
+  orderEl.innerHTML = renderOrderCard("sell", {
+    code: sellTarget.code,
+    name: sellTarget.name,
+    side: "sell",
+    quantity: plan.quantity,
+  });
 }
 
 async function submitSellForm(e) {
@@ -915,16 +1058,15 @@ async function submitSellForm(e) {
   const transactionDate = document.getElementById("sell-date").value;
   const memo = document.getElementById("sell-memo").value.trim();
 
-  if (!Number.isInteger(quantity) || quantity <= 0) {
-    setMessage(messageEl, "売却数量は1以上の整数で入力してください。", "error");
-    return;
-  }
-  if (quantity > sellTarget.quantity) {
-    setMessage(messageEl, `売却数量は保有数量(${sellTarget.quantity.toLocaleString()}株)以下にしてください。`, "error");
-    return;
-  }
-  if (!Number.isFinite(price) || price <= 0) {
-    setMessage(messageEl, "売却価格を入力してください。", "error");
+  // 入力検証は発注補助と同じ関数を使う(0株・保有超過・価格未入力をここで拒否。最終的な検証はWorker側でも行われる)
+  const plan = OA.calcSellPlan({
+    quantity,
+    price,
+    holdingQuantity: sellTarget.quantity,
+    avgCost: sellTarget.avgCost,
+  });
+  if (!plan.ok) {
+    setMessage(messageEl, plan.message, "error");
     return;
   }
 
@@ -954,6 +1096,146 @@ async function submitSellForm(e) {
   } finally {
     submitButton.disabled = false;
   }
+}
+
+// ---- BUY発注補助モーダル ----
+
+function loadStoredBuyBudget() {
+  try {
+    const stored = Number(localStorage.getItem(BUY_BUDGET_STORAGE_KEY));
+    return Number.isFinite(stored) && stored > 0 ? stored : DEFAULT_BUY_BUDGET;
+  } catch {
+    return DEFAULT_BUY_BUDGET;
+  }
+}
+
+function storeBuyBudget(value) {
+  try {
+    if (Number.isFinite(value) && value > 0) localStorage.setItem(BUY_BUDGET_STORAGE_KEY, String(value));
+  } catch {
+    // 保存できなくても計算には影響しないため無視する
+  }
+}
+
+function openBuyAssistModal(code) {
+  const src = buyAssistSources.get(code);
+  if (!src) return;
+  buyAssistTarget = src;
+
+  const hasPrice = src.price !== null && src.price !== undefined && Number(src.price) > 0;
+  document.getElementById("buy-assist-info").innerHTML = `
+    <div class="info-title">
+      <span class="stock-code">${esc(src.code)}</span>
+      <strong>${esc(src.name ?? "銘柄名未取得")}</strong>
+    </div>
+    <div class="info-grid">
+      <div class="metric"><span class="metric-label">現在株価（データ基準日 ${esc(src.priceAsOf ?? "不明")}）</span><span class="metric-value num">${hasPrice ? formatYenExact(src.price) : "—"}</span></div>
+      <div class="metric"><span class="metric-label">AI評価</span><span class="metric-value">${ratingBadge(src.rating)}</span></div>
+      <div class="metric"><span class="metric-label">スコア</span><span class="metric-value num">${src.score ?? "-"}</span></div>
+      <div class="metric"><span class="metric-label">リスク</span><span class="metric-value">${riskBadge(src.risk)}</span></div>
+      <div class="metric"><span class="metric-label">期待リターン</span><span class="metric-value num ${percentClass(src.expectedReturn)}">${formatPercent(src.expectedReturn)}</span></div>
+      <div class="metric"><span class="metric-label">想定保有期間</span><span class="metric-value num">${src.expectedHoldingDays ?? "-"}日</span></div>
+    </div>
+    <p class="assist-note">${hasPrice ? priceFreshnessNote(src.priceAsOf) : "現在株価を取得できていません。SBI証券で確認した株価を下に入力すると計算できます。"}</p>
+  `;
+  document.getElementById("buy-assist-budget").value = String(loadStoredBuyBudget());
+  document.getElementById("buy-assist-price").value = "";
+  setMessage(document.getElementById("buy-assist-message"), "");
+  updateBuyAssist();
+  showModal("buy-assist-modal");
+}
+
+/**
+ * 投資予定金額(と任意の株価入力)から、購入可能株数・実際の投資額・余りとSBI注文内容を表示する。
+ * 計算は OA.calcBuyPlan(純粋関数)で行い、サーバーへは何も送らない。
+ * @returns {object|null} 計算できた場合は {plan, price}
+ */
+function updateBuyAssist() {
+  const resultEl = document.getElementById("buy-assist-result");
+  const orderEl = document.getElementById("buy-assist-order");
+  const src = buyAssistTarget;
+  if (!src) {
+    resultEl.innerHTML = "";
+    orderEl.innerHTML = "";
+    return null;
+  }
+
+  const budget = Number(document.getElementById("buy-assist-budget").value);
+  const overrideRaw = document.getElementById("buy-assist-price").value.trim();
+  const override = overrideRaw === "" ? null : Number(overrideRaw);
+  if (override !== null && !(Number.isFinite(override) && override > 0)) {
+    resultEl.innerHTML = `<div class="assist-error">株価は0より大きい数値で入力してください（未入力ならデータ基準日の株価で計算します）。</div>`;
+    orderEl.innerHTML = "";
+    currentOrderText.buy = "";
+    return null;
+  }
+
+  const price = override !== null ? override : Number(src.price);
+  const plan = OA.calcBuyPlan(budget, price);
+  if (!plan.ok) {
+    resultEl.innerHTML = `<div class="assist-error">${esc(plan.message)}</div>`;
+    orderEl.innerHTML = "";
+    currentOrderText.buy = "";
+    return null;
+  }
+
+  const priceBasis =
+    override !== null
+      ? `入力した株価 ${formatYenExact(price)} で計算しています。`
+      : `データ基準日（${esc(src.priceAsOf ?? "不明")}）の株価 ${formatYenExact(price)} で計算しています（リアルタイム価格ではありません）。`;
+
+  if (plan.shares < 1) {
+    resultEl.innerHTML = `
+      <div class="assist-error">${esc(plan.message)}</div>
+      <p class="assist-note">${priceBasis}</p>`;
+    orderEl.innerHTML = "";
+    currentOrderText.buy = "";
+    return { plan, price };
+  }
+
+  resultEl.innerHTML = `
+    <div class="assist-tiles three">
+      ${assistTile("② 購入可能株数", `${plan.shares.toLocaleString()}株`, { primary: true })}
+      ${assistTile("③ 実際の投資額", formatYenExact(plan.actualAmount))}
+      ${assistTile("余り", formatYenExact(plan.remainder))}
+    </div>
+    <p class="assist-note">${priceBasis}端数は切り捨てています。</p>
+  `;
+  orderEl.innerHTML = renderOrderCard("buy", { code: src.code, name: src.name, side: "buy", quantity: plan.shares });
+  return { plan, price };
+}
+
+/** 約定後のBUY登録: 既存のBUY登録フォーム(POST /api/trades)に、計算した株数・株価を入力済みにして移動する。 */
+function goToBuyRegistration() {
+  const messageEl = document.getElementById("buy-assist-message");
+  const calc = updateBuyAssist();
+  if (!calc || calc.plan.shares < 1) {
+    setMessage(messageEl, "購入可能な株数が計算できていません。投資予定金額と株価を確認してください。", "error");
+    return;
+  }
+  storeBuyBudget(Number(document.getElementById("buy-assist-budget").value));
+  pendingTradePrefill = { code: buyAssistTarget.code, quantity: calc.plan.shares, price: calc.price };
+  hideModal("buy-assist-modal");
+  if (window.location.hash === "#/trades") {
+    applyTradePrefill();
+  } else {
+    window.location.hash = "#/trades";
+  }
+}
+
+function applyTradePrefill() {
+  if (!pendingTradePrefill) return;
+  const p = pendingTradePrefill;
+  pendingTradePrefill = null;
+  document.getElementById("trade-code").value = p.code;
+  document.getElementById("trade-type").value = "buy";
+  document.getElementById("trade-quantity").value = String(p.quantity);
+  document.getElementById("trade-price").value = String(p.price);
+  setMessage(
+    document.getElementById("trade-form-message"),
+    "SBI発注補助の計算値を入力しました。SBI証券で実際に約定した数量・価格・約定日に修正してから登録してください。"
+  );
+  document.getElementById("trade-form").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 // ---- 売買履歴画面 ----
@@ -1317,6 +1599,7 @@ function handleRoute() {
     initTradeDateField();
     setMessage(document.getElementById("trades-message"), "");
     reloadTradesAndPerformance();
+    applyTradePrefill(); // BUY発注補助から来た場合は、計算した株数・株価を入力済みにする
   } else {
     showView("home");
     setActiveNav("home");
@@ -1351,6 +1634,15 @@ document.getElementById("sell-quantity-all").addEventListener("click", () => {
   document.getElementById("sell-quantity").value = String(sellTarget.quantity);
   updateSellPreview();
 });
+
+// ランキング・ホーム・銘柄詳細 → BUY発注補助モーダル
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest('[data-action="buy-assist"]');
+  if (btn) openBuyAssistModal(btn.dataset.code);
+});
+document.getElementById("buy-assist-budget").addEventListener("input", updateBuyAssist);
+document.getElementById("buy-assist-price").addEventListener("input", updateBuyAssist);
+document.getElementById("buy-assist-register").addEventListener("click", goToBuyRegistration);
 
 // 売買履歴 → 取消モーダル
 document.getElementById("trades-list").addEventListener("click", (e) => {

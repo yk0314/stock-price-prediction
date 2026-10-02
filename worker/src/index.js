@@ -24,9 +24,13 @@ import {
 const DEFAULT_RANKING_LIMIT = 20;
 const MAX_RANKING_LIMIT = 100;
 
-// ランキング日の切り替え境界: 日本時間の午前3時。
-// generated_at(UTC)に +6時間 (= JST +9時間 - 3時間) を加えた日付が「ランキング日」になる。
-const RANKING_DAY_OFFSET_HOURS = 6;
+// ランキング日の切り替え境界: 日本時間の17:00(日次の自動実行の開始時刻と同じ)。
+// generated_at(UTC)に (JSTとの時差9時間 - 境界17時間) = -8時間 を加えた日付が「ランキング日」になる。
+// 例: 17:00 JST(=08:00 UTC)に始まった実行は、その日のランキング日に属する(08:00 - 8時間 = 当日00:00 UTC)。
+const RANKING_DAY_BOUNDARY_HOUR_JST = 17;
+const RANKING_DAY_OFFSET_HOURS = 9 - RANKING_DAY_BOUNDARY_HOUR_JST; // = -8
+// SQLiteのdate()の修飾子(例: "-8 hours")。負の値でも "+-8" にならないよう符号を明示する
+const RANKING_DAY_SQL_MODIFIER = `${RANKING_DAY_OFFSET_HOURS >= 0 ? "+" : "-"}${Math.abs(RANKING_DAY_OFFSET_HOURS)} hours`;
 
 function currentRankingDay(now = new Date()) {
   return new Date(now.getTime() + RANKING_DAY_OFFSET_HOURS * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -128,7 +132,7 @@ const EVALUATION_COLUMNS = `
  * ai_evaluations（D1）から、「今日のランキング日」における最新の1回の実行の評価だけを、
  * score降順で取得する。
  *
- * - ランキング日は日本時間の午前3時で切り替わる（currentRankingDay参照）。
+ * - ランキング日は日本時間の17:00で切り替わる（currentRankingDay参照）。
  *   前日以前の評価は表示しない。今日の実行が途中で終了しても、前日や前回完走分へのフォールバックはしない。
  * - 「1回の実行」は generated_at（実行開始時刻。同じ実行の全評価で同一）で識別する。
  *   今日のランキング日に複数回実行された場合は、generated_at が最大の実行だけが対象になり、
@@ -150,7 +154,7 @@ async function fetchRanking(db, limit, rankingDay) {
        WHERE ae.source = 'pipeline'
          AND ae.generated_at = (
            SELECT MAX(generated_at) FROM ai_evaluations
-           WHERE date(generated_at, '+${RANKING_DAY_OFFSET_HOURS} hours') = ?
+           WHERE date(generated_at, '${RANKING_DAY_SQL_MODIFIER}') = ?
          )
        ORDER BY ae.score DESC
        LIMIT ?`
@@ -283,11 +287,13 @@ async function buildStockLookupMaps(kv) {
   const stocks = (await getJson(kv, "stocks")) ?? [];
   const priceByCode = new Map();
   const nameByCode = new Map();
+  const dataAsOfByCode = new Map(); // 株価のデータ基準日(リアルタイム価格ではないことを画面で示すために使う)
   for (const s of stocks) {
     priceByCode.set(s.code, s.price ?? null);
     nameByCode.set(s.code, s.name ?? null);
+    dataAsOfByCode.set(s.code, s.dataAsOf ?? null);
   }
-  return { priceByCode, nameByCode };
+  return { priceByCode, nameByCode, dataAsOfByCode };
 }
 
 const VALID_TRANSACTION_TYPES = new Set(["buy", "sell"]);
@@ -445,7 +451,7 @@ export default {
       }
 
       // GET /api/ranking — AI評価ランキング（D1のai_evaluationsを参照）。
-      // 今日のランキング日（日本時間の午前3時で切り替わる）における最新の1回の実行の評価のみ、score降順。
+      // 今日のランキング日（日本時間の17:00で切り替わる）における最新の1回の実行の評価のみ、score降順。
       // 前日以前の評価・前回完走分へのフォールバックはしない（今日の評価が0件なら空配列）。
       // クエリパラメータ: limit（省略時20件、上限100件）
       if (path === "/api/ranking") {
@@ -694,7 +700,7 @@ export default {
       if (path === "/api/holdings") {
         if (!env.DB) return jsonResponse([]);
         try {
-          const [allTradeRows, { priceByCode, nameByCode }] = await Promise.all([
+          const [allTradeRows, { priceByCode, nameByCode, dataAsOfByCode }] = await Promise.all([
             fetchAllTradeRows(env.DB),
             buildStockLookupMaps(env.STOCK_KV),
           ]);
@@ -719,7 +725,14 @@ export default {
           );
           const purchaseEvaluationById = new Map(purchaseEntries);
 
-          const holdings = buildHoldings(allTradeRows, priceByCode, nameByCode, evaluationsByCode, purchaseEvaluationById);
+          const holdings = buildHoldings(
+            allTradeRows,
+            priceByCode,
+            nameByCode,
+            evaluationsByCode,
+            purchaseEvaluationById,
+            dataAsOfByCode
+          );
           return jsonResponse(holdings);
         } catch (err) {
           console.error(`[worker] GET /api/holdings 失敗: ${err.message}`);

@@ -228,13 +228,15 @@ export function purchaseEvaluationIdByCode(allTradeRows) {
  * GET /api/holdings のレスポンスを組み立てる。保有数量が0より大きい銘柄のみ返す。
  * @param evaluationsByCode Map<code, {latest, previous}>  latest=最新のAI評価, previous=その1つ前
  * @param purchaseEvaluationById Map<id, evaluation>       購入時AI評価(purchase_evaluation_idで引く)
+ * @param priceAsOfByCode Map<code, string>                 currentPriceのデータ基準日(KVのstocks.dataAsOf)
  */
 export function buildHoldings(
   allTradeRows,
   currentPriceByCode,
   nameByCode,
   evaluationsByCode,
-  purchaseEvaluationById = new Map()
+  purchaseEvaluationById = new Map(),
+  priceAsOfByCode = new Map()
 ) {
   const active = allTradeRows.filter(isActiveTrade);
   const byCode = groupTradesByCode(active);
@@ -257,6 +259,7 @@ export function buildHoldings(
       quantity,
       avgCost,
       currentPrice,
+      priceAsOf: priceAsOfByCode.get(code) ?? null, // currentPriceのデータ基準日
       unrealizedPnl,
       unrealizedPnlPct,
       latestEvaluation: evaluations.latest ?? null,

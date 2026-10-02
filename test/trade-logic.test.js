@@ -299,3 +299,19 @@ test("fetchHeldCodes: SQLで取消済みの取引を除外し、残った取引�
   assert.match(executedSql, /canceled_at IS NULL/);
   assert.deepEqual(held, ["9001"]);
 });
+
+// ---- SBI発注補助: 保有銘柄の株価のデータ基準日 ----
+
+test("保有銘柄: 株価のデータ基準日(priceAsOf)が付与され、無ければ null", () => {
+  const rows = [trade("8101", "buy", "2026-08-01", 10, 100), trade("8102", "buy", "2026-08-01", 10, 100)];
+  const holdings = buildHoldings(
+    rows,
+    new Map([["8101", 120]]),
+    new Map(),
+    new Map(),
+    new Map(),
+    new Map([["8101", "2026-07-02"]])
+  );
+  assert.equal(holdings.find((h) => h.code === "8101").priceAsOf, "2026-07-02");
+  assert.equal(holdings.find((h) => h.code === "8102").priceAsOf, null);
+});

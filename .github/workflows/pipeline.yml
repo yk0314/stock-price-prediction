@@ -1,11 +1,11 @@
 name: JP Stock AI Pipeline
 
 on:
-  # 平日 21:00 JST (= 12:00 UTC) に自動実行する。
+  # 平日 17:00 JST (= 08:00 UTC) に自動実行する。ランキングの「今日」の切り替え(JST 17:00)と同じ時刻。
   # GitHub Actionsのscheduleは数分〜数十分遅れることがある。
   # scheduleはデフォルトブランチ(main)のワークフローだけが対象になる。
   schedule:
-    - cron: "0 12 * * 1-5"
+    - cron: "0 8 * * 1-5"
   workflow_dispatch:
     inputs:
       cutoffDate:
