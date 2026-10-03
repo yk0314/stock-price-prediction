@@ -5,10 +5,14 @@ import {
   buildPerformance,
   buildTradeHistory,
   computePositionFromTrades,
+  findHoldingShortfall,
   groupTradesByCode,
+  isValidDateString,
   listHoldingCodes,
+  parseTradeEdit,
   purchaseEvaluationIdByCode,
   validateCancel,
+  validateEdit,
 } from "../worker/src/tradeLogic.mjs";
 import { fetchHeldCodes } from "../src/d1Repository.js";
 
@@ -314,4 +318,249 @@ test("保有銘柄: 株価のデータ基準日(priceAsOf)が付与され、無�
   );
   assert.equal(holdings.find((h) => h.code === "8101").priceAsOf, "2026-07-02");
   assert.equal(holdings.find((h) => h.code === "8102").priceAsOf, null);
+});
+
+
+// ---- 取引の編集 ----
+
+/** DBのUPDATEを模した、編集後の取引行(取引IDは維持したまま値だけ更新)。 */
+function applyEdit(rows, id, v) {
+  return rows.map((r) =>
+    r.id === id
+      ? { ...r, quantity: v.quantity, price: v.price, amount: v.quantity * v.price, transaction_date: v.transactionDate, memo: v.memo }
+      : r
+  );
+}
+
+function editValues(row, patch = {}) {
+  return { quantity: row.quantity, price: row.price, transactionDate: row.transaction_date, memo: row.memo, ...patch };
+}
+
+test("編集: 取引日は YYYY-MM-DD の実在する日付だけが有効", () => {
+  for (const ok of ["2026-10-02", "2024-02-29"]) assert.equal(isValidDateString(ok), true, ok);
+  for (const ng of ["2026-02-30", "2026-13-01", "2026/10/02", "20261002", "", null, undefined, 20261002, "2026-10-2"]) {
+    assert.equal(isValidDateString(ng), false, String(ng));
+  }
+});
+
+test("編集の入力検証: 数量・価格・日付・メモ・変更不可の項目", () => {
+  const target = trade("A001", "buy", "2026-09-01", 100, 1000, { memo: "元のメモ" });
+  const base = { quantity: 100, price: 1010, transactionDate: "2026-09-02" };
+
+  for (const quantity of [0, -1, 2.5, "100", NaN, Infinity, null, undefined]) {
+    const r = parseTradeEdit({ ...base, quantity }, target);
+    assert.equal(r.ok, false, `quantity=${String(quantity)}`);
+    assert.equal(r.status, 400);
+    assert.match(r.error, /数量/);
+  }
+  for (const price of [0, -5, "1000", NaN, Infinity, null, undefined]) {
+    const r = parseTradeEdit({ ...base, price }, target);
+    assert.equal(r.ok, false, `price=${String(price)}`);
+    assert.match(r.error, /価格/);
+  }
+  for (const transactionDate of ["2026-02-30", "2026/09/02", "", null, undefined, 20260902]) {
+    const r = parseTradeEdit({ ...base, transactionDate }, target);
+    assert.equal(r.ok, false, `date=${String(transactionDate)}`);
+    assert.match(r.error, /取引日/);
+  }
+  assert.equal(parseTradeEdit(null, target).ok, false);
+  assert.equal(parseTradeEdit([], target).ok, false);
+
+  // 銘柄・取引種別は変更不可(同じ値を送るのは許可)
+  assert.equal(parseTradeEdit({ ...base, code: "ZZZZ" }, target).ok, false);
+  assert.equal(parseTradeEdit({ ...base, transactionType: "sell" }, target).ok, false);
+  assert.match(parseTradeEdit({ ...base, transactionType: "sell" }, target).error, /変更できません/);
+  assert.equal(parseTradeEdit({ ...base, code: "A001", transactionType: "buy" }, target).ok, true);
+
+  // メモ: 省略=現在の値を維持 / null・空白=クリア / 文字列=前後の空白を除去 / 長すぎ・文字列以外は拒否
+  assert.equal(parseTradeEdit(base, target).values.memo, "元のメモ");
+  assert.equal(parseTradeEdit({ ...base, memo: null }, target).values.memo, null);
+  assert.equal(parseTradeEdit({ ...base, memo: "   " }, target).values.memo, null);
+  assert.equal(parseTradeEdit({ ...base, memo: "  約定価格に修正  " }, target).values.memo, "約定価格に修正");
+  assert.equal(parseTradeEdit({ ...base, memo: "a".repeat(501) }, target).ok, false);
+  assert.equal(parseTradeEdit({ ...base, memo: 123 }, target).ok, false);
+});
+
+test("編集の整合性: 存在しない取引は404、取消済みの取引は409", () => {
+  const rows = [
+    trade("A002", "buy", "2026-09-01", 100, 1000),
+    trade("A002", "buy", "2026-09-02", 10, 1000, { canceled_at: "2026-09-03T00:00:00.000Z" }),
+  ];
+  const missing = validateEdit(rows, 999999, editValues(rows[0]));
+  assert.equal(missing.ok, false);
+  assert.equal(missing.status, 404);
+  const canceled = validateEdit(rows, rows[1].id, editValues(rows[1], { price: 1 }));
+  assert.equal(canceled.ok, false);
+  assert.equal(canceled.status, 409);
+  assert.match(canceled.error, /取消済みの取引は編集できません/);
+});
+
+test("編集の整合性: BUYの数量を減らして後続のSELLが保有数量を超える場合は拒否（後続のSELLを先に修正する案内）", () => {
+  const rows = [trade("A003", "buy", "2026-09-01", 100, 1000), trade("A003", "sell", "2026-09-05", 80, 1100)];
+  const ng = validateEdit(rows, rows[0].id, editValues(rows[0], { quantity: 50 }));
+  assert.equal(ng.ok, false);
+  assert.equal(ng.status, 409);
+  assert.match(ng.error, /先に後続のSELLを修正/);
+  // 80株までなら可、価格だけの変更は常に可
+  assert.equal(validateEdit(rows, rows[0].id, editValues(rows[0], { quantity: 80 })).ok, true);
+  assert.equal(validateEdit(rows, rows[0].id, editValues(rows[0], { price: 1234.5 })).ok, true);
+});
+
+test("編集の整合性: BUYの取引日をSELLより後ろに動かして保有数量が足りなくなる場合は拒否", () => {
+  const rows = [trade("A004", "buy", "2026-09-01", 100, 1000), trade("A004", "sell", "2026-09-05", 100, 1100)];
+  assert.equal(validateEdit(rows, rows[0].id, editValues(rows[0], { transactionDate: "2026-09-10" })).ok, false);
+  assert.equal(validateEdit(rows, rows[0].id, editValues(rows[0], { transactionDate: "2026-09-04" })).ok, true);
+});
+
+test("編集の整合性: SELLの数量が売却時点の保有数量を超える・取引日が買いより前になる場合は拒否", () => {
+  const rows = [trade("A005", "buy", "2026-09-01", 100, 1000), trade("A005", "sell", "2026-09-05", 40, 1100)];
+  const over = validateEdit(rows, rows[1].id, editValues(rows[1], { quantity: 101 }));
+  assert.equal(over.ok, false);
+  assert.match(over.error, /保有数量（100株）を超えて/);
+  assert.equal(validateEdit(rows, rows[1].id, editValues(rows[1], { quantity: 100 })).ok, true);
+  assert.equal(validateEdit(rows, rows[1].id, editValues(rows[1], { transactionDate: "2026-08-31" })).ok, false);
+});
+
+test("編集の整合性: SELLの数量を増やすと別のSELLが足りなくなる場合も拒否される", () => {
+  const rows = [
+    trade("A006", "buy", "2026-09-01", 100, 1000),
+    trade("A006", "sell", "2026-09-03", 30, 1100),
+    trade("A006", "sell", "2026-09-05", 60, 1100),
+  ];
+  const ng = validateEdit(rows, rows[1].id, editValues(rows[1], { quantity: 50 })); // 50 + 60 > 100
+  assert.equal(ng.ok, false);
+  assert.match(ng.error, /別のSELL/);
+  assert.equal(validateEdit(rows, rows[1].id, editValues(rows[1], { quantity: 40 })).ok, true); // 40 + 60 = 100
+});
+
+test("取消済みの取引は、編集の整合性チェックの対象にも含まれない", () => {
+  const rows = [
+    trade("A007", "buy", "2026-09-01", 100, 1000),
+    trade("A007", "sell", "2026-09-05", 100, 1100, { canceled_at: "2026-09-06T00:00:00.000Z" }),
+  ];
+  // 取消済みのSELLは無いものとして扱うので、BUYの数量を減らしても拒否されない
+  assert.equal(validateEdit(rows, rows[0].id, editValues(rows[0], { quantity: 10 })).ok, true);
+  assert.equal(findHoldingShortfall([]), null);
+});
+
+test("BUY価格の編集: 平均取得価格・含み損益・実現損益・勝敗・通算成績が編集後の履歴から再計算される", () => {
+  const rows = [trade("B001", "buy", "2026-09-01", 100, 1000), trade("B001", "sell", "2026-09-05", 40, 1250)];
+  const prices = new Map([["B001", 1300]]);
+  let history = buildTradeHistory(rows, prices);
+  assert.equal(history.find((h) => h.transactionType === "sell").pnl, 10000);
+
+  const edited = applyEdit(rows, rows[0].id, editValues(rows[0], { price: 1100 })); // 予定価格1000 → 約定価格1100
+  assert.equal(validateEdit(rows, rows[0].id, editValues(rows[0], { price: 1100 })).ok, true);
+
+  const [holding] = buildHoldings(edited, prices, new Map(), new Map());
+  assert.equal(holding.quantity, 60);
+  assert.equal(holding.avgCost, 1100);
+  assert.equal(holding.unrealizedPnl, (1300 - 1100) * 60);
+
+  history = buildTradeHistory(edited, prices);
+  const sell = history.find((h) => h.transactionType === "sell");
+  assert.equal(sell.avgCostAtSale, 1100);
+  assert.equal(sell.pnl, 6000);
+  assert.ok(Math.abs(sell.pnlPct - (6000 / 44000) * 100) < 1e-9);
+  assert.equal(sell.win, true);
+  const buy = history.find((h) => h.transactionType === "buy");
+  assert.equal(buy.price, 1100);
+  assert.equal(buy.amount, 110000);
+
+  const { summary, series } = buildPerformance(edited);
+  assert.equal(summary.totalRealizedPnl, 6000);
+  assert.ok(Math.abs(summary.totalReturnPct - (6000 / 44000) * 100) < 1e-9);
+  assert.equal(summary.maxProfit, 6000);
+  assert.deepEqual(series.map((x) => x.cumulativePnl), [6000]);
+});
+
+test("SELL価格の編集: 実現損益・リターン率・勝敗が反転し、通算成績・累計損益チャートも更新される", () => {
+  const rows = [
+    trade("B002", "buy", "2026-09-01", 100, 1000),
+    trade("B002", "sell", "2026-09-03", 50, 1200), // +10,000(勝ち)
+    trade("B002", "sell", "2026-09-05", 50, 1100), // +5,000(勝ち)
+  ];
+  let perf = buildPerformance(rows);
+  assert.equal(perf.summary.winCount, 2);
+  assert.equal(perf.summary.totalRealizedPnl, 15000);
+
+  const edited = applyEdit(rows, rows[1].id, editValues(rows[1], { price: 900 })); // 約定価格が900円だった → 負け
+  const history = buildTradeHistory(edited, new Map());
+  const sell = history.find((h) => h.id === rows[1].id);
+  assert.equal(sell.pnl, -5000);
+  assert.ok(Math.abs(sell.pnlPct - -10) < 1e-9);
+  assert.equal(sell.win, false);
+  assert.equal(sell.outcome, "lose");
+
+  perf = buildPerformance(edited);
+  assert.equal(perf.summary.winCount, 1);
+  assert.equal(perf.summary.loseCount, 1);
+  assert.equal(perf.summary.winRate, 50);
+  assert.equal(perf.summary.totalRealizedPnl, 0);
+  assert.equal(perf.summary.avgProfit, 5000);
+  assert.equal(perf.summary.avgLoss, -5000);
+  assert.equal(perf.summary.maxProfit, 5000);
+  assert.equal(perf.summary.maxLoss, -5000);
+  assert.equal(perf.summary.totalReturnPct, 0);
+  assert.deepEqual(perf.series.map((x) => x.cumulativePnl), [-5000, 0]);
+});
+
+test("BUY数量の編集: 保有数量・平均取得価格が再計算される(売却に影響しない範囲)", () => {
+  const rows = [trade("B003", "buy", "2026-09-01", 100, 1000), trade("B003", "sell", "2026-09-05", 40, 1250)];
+  assert.equal(validateEdit(rows, rows[0].id, editValues(rows[0], { quantity: 60 })).ok, true);
+  const edited = applyEdit(rows, rows[0].id, editValues(rows[0], { quantity: 60 }));
+  const [h] = buildHoldings(edited, new Map(), new Map(), new Map());
+  assert.equal(h.quantity, 20);
+  assert.equal(h.avgCost, 1000);
+  assert.equal(buildPerformance(edited).summary.totalRealizedPnl, 10000);
+  // 30株への変更は、後続のSELL(40株)が足りなくなるので拒否
+  assert.equal(validateEdit(rows, rows[0].id, editValues(rows[0], { quantity: 30 })).ok, false);
+});
+
+test("SELL数量の編集: 保有数量・実現損益・取得原価が再計算される", () => {
+  const rows = [trade("B004", "buy", "2026-09-01", 100, 1000), trade("B004", "sell", "2026-09-05", 40, 1250)];
+  const edited = applyEdit(rows, rows[1].id, editValues(rows[1], { quantity: 60 }));
+  const [h] = buildHoldings(edited, new Map(), new Map(), new Map());
+  assert.equal(h.quantity, 40);
+  const perf = buildPerformance(edited);
+  assert.equal(perf.summary.totalRealizedPnl, 15000);
+  assert.equal(perf.summary.totalCostBasis, 60000);
+  assert.ok(Math.abs(perf.summary.totalReturnPct - 25) < 1e-9);
+});
+
+test("取引日の編集: 約定順が変わると、売却時の平均取得価格(移動平均法)・損益が変わる", () => {
+  const rows = [
+    trade("B005", "buy", "2026-09-01", 100, 1000),
+    trade("B005", "buy", "2026-09-02", 100, 2000),
+    trade("B005", "sell", "2026-09-03", 50, 1200),
+  ];
+  let perf = buildPerformance(rows);
+  assert.equal(perf.series[0].avgCostAtSale, 1500);
+  assert.equal(perf.summary.totalRealizedPnl, -15000);
+
+  // 2回目のBUYの約定日が実際は売却より後だった
+  const values = editValues(rows[1], { transactionDate: "2026-09-04" });
+  assert.equal(validateEdit(rows, rows[1].id, values).ok, true);
+  const edited = applyEdit(rows, rows[1].id, values);
+  perf = buildPerformance(edited);
+  assert.equal(perf.series[0].avgCostAtSale, 1000);
+  assert.equal(perf.summary.totalRealizedPnl, 10000);
+  const [h] = buildHoldings(edited, new Map(), new Map(), new Map());
+  assert.equal(h.quantity, 150);
+  assert.ok(Math.abs(h.avgCost - 250000 / 150) < 1e-9);
+});
+
+test("メモの編集は、数量・損益・通算成績に影響しない / 取消済みの取引は編集後も計算に混ざらない", () => {
+  const rows = [
+    trade("B006", "buy", "2026-09-01", 100, 1000),
+    trade("B006", "sell", "2026-09-05", 100, 1100),
+    trade("B006", "sell", "2026-09-06", 10, 5000, { canceled_at: "2026-09-07T00:00:00.000Z" }),
+  ];
+  const before = buildPerformance(rows);
+  const edited = applyEdit(rows, rows[0].id, editValues(rows[0], { memo: "約定価格に修正" }));
+  assert.equal(edited[0].memo, "約定価格に修正");
+  assert.deepEqual(buildPerformance(edited), before);
+  assert.equal(before.summary.sellCount, 1);
+  assert.equal(before.summary.totalRealizedPnl, 10000);
+  assert.deepEqual(listHoldingCodes(edited), []);
 });

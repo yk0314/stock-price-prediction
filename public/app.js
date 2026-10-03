@@ -15,12 +15,12 @@ async function fetchJson(path) {
 }
 
 /**
- * JSONをPOSTする。エラー時もレスポンス本文(error)を読めるよう、例外にはせず結果を返す。
+ * JSONを送信する(POST/PUT)。エラー時もレスポンス本文(error)を読めるよう、例外にはせず結果を返す。
  * @returns {Promise<{ok:boolean, status:number, body:any}>}
  */
-async function postJson(path, payload) {
+async function sendJson(method, path, payload) {
   const res = await fetch(API_BASE + path, {
-    method: "POST",
+    method,
     headers: { "Content-Type": "application/json" },
     body: payload === undefined ? undefined : JSON.stringify(payload),
   });
@@ -31,6 +31,14 @@ async function postJson(path, payload) {
     body = null;
   }
   return { ok: res.ok, status: res.status, body };
+}
+
+function postJson(path, payload) {
+  return sendJson("POST", path, payload);
+}
+
+function putJson(path, payload) {
+  return sendJson("PUT", path, payload);
 }
 
 // ---- フォーマット用ヘルパー ----
@@ -66,8 +74,9 @@ function formatYen(value) {
 function formatSignedYen(value) {
   if (value === null || value === undefined) return "-";
   const rounded = Math.round(Number(value));
-  const sign = rounded > 0 ? "+" : "";
-  return `${sign}¥${rounded.toLocaleString()}`;
+  // 符号は金額記号の前に置く(例: +¥6,000 / -¥2,000)。以前は負の値が「¥-2,000」と表示されていた
+  const sign = rounded > 0 ? "+" : rounded < 0 ? "-" : "";
+  return `${sign}¥${Math.abs(rounded).toLocaleString()}`;
 }
 
 /** 値が無いときは「—」を返す円表記。 */
@@ -1580,6 +1589,7 @@ function renderTradeCard(t) {
         t.canceled
           ? ""
           : `<div class="trade-card-actions">
+               <button type="button" class="small-button edit-action" data-action="edit-trade" data-id="${t.id}">編集</button>
                <button type="button" class="small-button cancel-action" data-action="cancel-trade" data-id="${t.id}">${isBuy ? "BUY登録を取り消す" : "SELL登録を取り消す"}</button>
              </div>`
       }
@@ -1604,6 +1614,94 @@ async function loadTrades() {
 function reloadTradesAndPerformance() {
   loadPerformance();
   return loadTrades();
+}
+
+// ---- 取引の編集 ----
+
+let editTarget = null;
+
+/** 登録済みのBUY/SELLを、SBI証券での実際の約定結果(数量・価格・取引日)に合わせて修正する。取消済みは編集できない。 */
+function openEditTradeModal(tradeId) {
+  const t = currentTrades.find((x) => x.id === tradeId);
+  if (!t || t.canceled) return;
+  editTarget = t;
+  const isBuy = t.transactionType === "buy";
+
+  document.getElementById("edit-trade-title").textContent = `${isBuy ? "BUY" : "SELL"}取引を編集`;
+  document.getElementById("edit-trade-info").innerHTML = `
+    <div class="info-title">
+      <span class="trade-type-flag ${isBuy ? "buy" : "sell"}">${isBuy ? "買い" : "売り"}</span>
+      <span class="stock-code">${esc(t.code)}</span>
+      <strong>${esc(t.name ?? "")}</strong>
+    </div>
+    <p class="assist-note">取引種別と銘柄は変更できません。間違えて登録した場合は、この取引を取り消して登録し直してください。</p>
+  `;
+  document.getElementById("edit-trade-quantity").value = String(t.quantity);
+  document.getElementById("edit-trade-price").value = String(t.price);
+  const dateEl = document.getElementById("edit-trade-date");
+  dateEl.max = todayLocalStr();
+  dateEl.value = t.transactionDate;
+  document.getElementById("edit-trade-memo").value = t.memo ?? "";
+  setMessage(document.getElementById("edit-trade-message"), "");
+  document.getElementById("edit-trade-save").disabled = false;
+  showModal("edit-trade-modal");
+}
+
+async function submitEditTrade(e) {
+  e.preventDefault();
+  if (!editTarget) return;
+  const messageEl = document.getElementById("edit-trade-message");
+  const button = document.getElementById("edit-trade-save");
+  setMessage(messageEl, "");
+
+  const quantity = Number(document.getElementById("edit-trade-quantity").value);
+  const price = Number(document.getElementById("edit-trade-price").value);
+  const transactionDate = document.getElementById("edit-trade-date").value;
+  const memo = document.getElementById("edit-trade-memo").value.trim();
+
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    setMessage(messageEl, "数量は1以上の整数で入力してください。", "error");
+    return;
+  }
+  if (!Number.isFinite(price) || price <= 0) {
+    setMessage(messageEl, "価格は0より大きい数値で入力してください。", "error");
+    return;
+  }
+  if (!transactionDate) {
+    setMessage(messageEl, "取引日を入力してください。", "error");
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    // 整合性チェック(後続のSELLとの保有数量など)と再計算の元になる取引履歴の更新は、Worker側(PUT /api/trades/:id)に任せる
+    const result = await putJson(`/api/trades/${editTarget.id}`, {
+      quantity,
+      price,
+      transactionDate,
+      memo: memo || null,
+    });
+    if (!result.ok) {
+      // 例: 後続のSELLがあるBUYの数量を減らす場合は「先に後続のSELLを修正…」が返る
+      setMessage(messageEl, result.body?.error ?? "編集に失敗しました。", "error");
+      button.disabled = false;
+      return;
+    }
+    const label = `${editTarget.code} ${editTarget.name ?? ""}`.trim();
+    const kind = editTarget.transactionType === "buy" ? "BUY" : "SELL";
+    hideModal("edit-trade-modal");
+    editTarget = null;
+    cachedLatestBuyDateByCode = null;
+    setMessage(
+      document.getElementById("trades-message"),
+      `${label} の${kind}取引を更新しました。保有数量・損益・通算成績を再計算しました。`,
+      "success"
+    );
+    await reloadTradesAndPerformance();
+  } catch {
+    setMessage(messageEl, "通信エラーが発生しました。", "error");
+    button.disabled = false;
+  }
 }
 
 // ---- 取引の取消 ----
@@ -1827,9 +1925,15 @@ document.getElementById("buy-assist-exec-price").addEventListener("input", () =>
 
 // 売買履歴 → 取消モーダル
 document.getElementById("trades-list").addEventListener("click", (e) => {
+  const editBtn = e.target.closest('[data-action="edit-trade"]');
+  if (editBtn) {
+    openEditTradeModal(Number(editBtn.dataset.id));
+    return;
+  }
   const btn = e.target.closest('[data-action="cancel-trade"]');
   if (btn) openCancelModal(Number(btn.dataset.id));
 });
+document.getElementById("edit-trade-form").addEventListener("submit", submitEditTrade);
 document.getElementById("cancel-confirm").addEventListener("click", submitCancel);
 
 async function loadMetaHeader() {

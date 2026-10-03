@@ -78,6 +78,24 @@ export function computePositionFromTrades(tradesForCodeAsc) {
 }
 
 /**
+ * 時系列昇順(取消済みは含めないこと)の取引を順に追い、保有数量が足りなくなるSELLがあれば最初の1件を返す。
+ * 取消・編集の整合性チェックで共通に使う(保有数量の追い方は computePositionFromTrades と同じ)。
+ * @returns {{trade: object, available: number} | null} available = そのSELLの直前の保有数量
+ */
+export function findHoldingShortfall(activeTradesAsc) {
+  let quantity = 0;
+  for (const t of activeTradesAsc) {
+    if (t.transaction_type === "buy") {
+      quantity += t.quantity;
+    } else if (t.transaction_type === "sell") {
+      if (t.quantity > quantity) return { trade: t, available: quantity };
+      quantity -= t.quantity;
+    }
+  }
+  return null;
+}
+
+/**
  * 取引の取消が可能かを検証する。
  * @param {Array} tradesForCode 対象銘柄のtrades行(取消済みを含んでよい)
  * @param {number} targetId 取り消したい取引のid
@@ -100,19 +118,129 @@ export function validateCancel(tradesForCode, targetId) {
     return { ok: true, target };
   }
 
-  const active = tradesForCode.filter(isActiveTrade).sort(compareTradesAsc);
-  let quantity = 0;
-  for (const t of active) {
-    if (t.id === targetId) continue;
-    quantity += t.transaction_type === "buy" ? t.quantity : -t.quantity;
-    if (quantity < 0) {
+  const remaining = tradesForCode.filter((t) => isActiveTrade(t) && t.id !== targetId).sort(compareTradesAsc);
+  if (findHoldingShortfall(remaining)) {
+    return {
+      ok: false,
+      status: 409,
+      error:
+        "このBUYを取り消すと、後続のSELLの数量が保有数量を超えてしまいます。先に該当するSELLを取り消してください。",
+    };
+  }
+  return { ok: true, target };
+}
+
+// ---- 取引の編集 ----
+
+export const MEMO_MAX_LENGTH = 500;
+
+/** "YYYY-MM-DD" 形式で、実在する日付かどうか(2026-02-30 などは不正)。 */
+export function isValidDateString(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const d = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
+}
+
+/**
+ * PUT /api/trades/:id の入力を検証し、更新する値を返す。
+ * 編集できるのは 数量・価格・取引日・メモ のみ。銘柄コードと取引種別(買い/売り)は取引の意味そのものを
+ * 変えてしまうため変更不可(同じ値を送るのは許可。違う値を送ると拒否)。memoを省略すると現在の値を維持する。
+ * @returns {{ok:true, values:{quantity:number, price:number, transactionDate:string, memo:string|null}}
+ *         | {ok:false, status:number, error:string}}
+ */
+export function parseTradeEdit(body, target) {
+  const fail = (error) => ({ ok: false, status: 400, error });
+  if (!body || typeof body !== "object" || Array.isArray(body)) return fail("リクエスト本文が不正です。");
+
+  if (
+    (body.code !== undefined && String(body.code) !== target.code) ||
+    (body.transactionType !== undefined && body.transactionType !== target.transaction_type)
+  ) {
+    return fail("銘柄コードと取引種別（買い/売り）は変更できません。間違えた場合は、この取引を取り消して登録し直してください。");
+  }
+
+  const { quantity, price, transactionDate } = body;
+  if (typeof quantity !== "number" || !Number.isInteger(quantity) || quantity <= 0) {
+    return fail("数量は1以上の整数で指定してください。");
+  }
+  if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) {
+    return fail("価格は0より大きい数値で指定してください。");
+  }
+  if (!isValidDateString(transactionDate)) {
+    return fail("取引日は YYYY-MM-DD 形式の正しい日付で指定してください。");
+  }
+
+  let memo;
+  if (body.memo === undefined) {
+    memo = target.memo ?? null;
+  } else if (body.memo === null) {
+    memo = null;
+  } else if (typeof body.memo === "string") {
+    const trimmed = body.memo.trim();
+    if (trimmed.length > MEMO_MAX_LENGTH) return fail(`メモは${MEMO_MAX_LENGTH}文字以内で入力してください。`);
+    memo = trimmed === "" ? null : trimmed;
+  } else {
+    return fail("メモは文字列で指定してください。");
+  }
+
+  return { ok: true, values: { quantity, price, transactionDate, memo } };
+}
+
+/**
+ * 取引の編集が可能かを検証する(既存の取引整合性チェックを使う)。
+ * 編集後の値で取引を置き換えた状態で、時系列に保有数量を追い、保有数量が足りなくなるSELLが出る場合は拒否する。
+ *  - BUYの数量を減らす/日付を後ろにずらす → 後続のSELLが足りなくなる
+ *  - SELLの数量を増やす/日付を前にずらす → 売却時点の保有数量を超える
+ * 価格だけの変更や、整合性に影響しない変更は常に許可される(損益・平均取得価格・通算成績は、
+ * 保存された値ではなく常に取引履歴から再計算されるため、ここで再計算する必要はない)。
+ * @returns {{ok:true, target:object} | {ok:false, status:number, error:string}}
+ */
+export function validateEdit(tradesForCode, targetId, values) {
+  const target = tradesForCode.find((t) => t.id === targetId);
+  if (!target) {
+    return { ok: false, status: 404, error: "編集対象の取引が見つかりません。" };
+  }
+  if (target.canceled_at) {
+    return { ok: false, status: 409, error: "取消済みの取引は編集できません。" };
+  }
+
+  const edited = tradesForCode
+    .filter(isActiveTrade)
+    .map((t) =>
+      t.id === targetId
+        ? {
+            ...t,
+            quantity: values.quantity,
+            price: values.price,
+            amount: values.quantity * values.price,
+            transaction_date: values.transactionDate,
+          }
+        : t
+    )
+    .sort(compareTradesAsc);
+
+  const shortfall = findHoldingShortfall(edited);
+  if (shortfall) {
+    if (target.transaction_type === "buy") {
       return {
         ok: false,
         status: 409,
         error:
-          "このBUYを取り消すと、後続のSELLの数量が保有数量を超えてしまいます。先に該当するSELLを取り消してください。",
+          "この変更を反映すると、後続のSELLの数量が保有数量を超えてしまいます。先に後続のSELLを修正（または取消）してください。",
       };
     }
+    if (shortfall.trade.id === targetId) {
+      return {
+        ok: false,
+        status: 409,
+        error: `この数量・取引日だと、売却時点の保有数量（${shortfall.available.toLocaleString()}株）を超えてしまいます。数量や取引日を見直してください。`,
+      };
+    }
+    return {
+      ok: false,
+      status: 409,
+      error: "この変更を反映すると、別のSELLの数量が保有数量を超えてしまいます。先にそのSELLを修正（または取消）してください。",
+    };
   }
   return { ok: true, target };
 }

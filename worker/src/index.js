@@ -17,8 +17,11 @@ import {
   buildTradeHistory,
   computePositionFromTrades,
   listHoldingCodes,
+  mapTradeRow,
+  parseTradeEdit,
   purchaseEvaluationIdByCode,
   validateCancel,
+  validateEdit,
 } from "./tradeLogic.mjs";
 
 const DEFAULT_RANKING_LIMIT = 20;
@@ -42,7 +45,7 @@ function jsonResponse(data, status = 200) {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     },
   });
@@ -385,6 +388,62 @@ async function handleCreateTrade(db, kv, body) {
 }
 
 /**
+ * PUT /api/trades/:id を処理する(登録済みの取引の編集)。
+ * 実際のSBI証券での約定結果に合わせて、数量・価格・取引日・メモを修正する用途。
+ * - 取引は既存のid・既存のカラムのまま UPDATE する(物理DELETEして作り直さない。canceled_atの論理取消設計も維持)。
+ * - 銘柄コード・取引種別(買い/売り)・購入時AI評価(purchase_evaluation_id)は変更しない。
+ * - 存在しない取引は404、取消済みは409、不正な数量・価格・日付は400。
+ * - 編集によって過去・後続の取引との整合性(保有数量)が崩れる場合は409で拒否する(既存の整合性チェックを使用)。
+ * 保有数量・平均取得価格・損益・勝敗・通算成績は保存された値を持たず、常に取消されていない取引から
+ * 計算するため、ここでは取引行を更新するだけで再計算は自動的に反映される。
+ */
+async function handleEditTrade(db, tradeId, body) {
+  const target = await db.prepare(`SELECT * FROM trades WHERE id = ?`).bind(tradeId).first();
+  if (!target) {
+    return { status: 404, body: { error: "編集対象の取引が見つかりません。" } };
+  }
+  if (target.canceled_at) {
+    return { status: 409, body: { error: "取消済みの取引は編集できません。" } };
+  }
+
+  const parsed = parseTradeEdit(body, target);
+  if (!parsed.ok) {
+    return { status: parsed.status, body: { error: parsed.error } };
+  }
+  const values = parsed.values;
+
+  const rowsForCode = await fetchAllTradeRows(db, target.code, { includeCanceled: true });
+  const verdict = validateEdit(rowsForCode, tradeId, values);
+  if (!verdict.ok) {
+    return { status: verdict.status, body: { error: verdict.error } };
+  }
+
+  const amount = values.quantity * values.price;
+  const result = await db
+    .prepare(
+      `UPDATE trades SET quantity = ?, price = ?, amount = ?, transaction_date = ?, memo = ?
+       WHERE id = ? AND canceled_at IS NULL`
+    )
+    .bind(values.quantity, values.price, amount, values.transactionDate, values.memo, tradeId)
+    .run();
+  if (result.meta && result.meta.changes === 0) {
+    return { status: 409, body: { error: "取消済みの取引は編集できません。" } };
+  }
+
+  return {
+    status: 200,
+    body: mapTradeRow({
+      ...target,
+      quantity: values.quantity,
+      price: values.price,
+      amount,
+      transaction_date: values.transactionDate,
+      memo: values.memo,
+    }),
+  };
+}
+
+/**
  * POST /api/trades/:id/cancel を処理する(論理取消。物理DELETEはしない)。
  * - すでに取消済みの取引は409。
  * - SELLの取消は常に可能(保有数量・平均取得価格は、取消済みを除いた取引から再計算される)。
@@ -438,7 +497,7 @@ export default {
           status: 204,
           headers: {
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type",
           },
         });
@@ -640,6 +699,28 @@ export default {
           return jsonResponse(responseBody, status);
         } catch (err) {
           console.error(`[worker] POST /api/trades 失敗: ${err.message}`);
+          return errorResponse(500);
+        }
+      }
+
+      // PUT /api/trades/:id — 登録済みの売買取引の編集(数量・価格・取引日・メモ)。
+      // 実際のSBI証券での約定結果に合わせて修正する用途。銘柄・取引種別は変更不可。
+      const editMatch = path.match(/^\/api\/trades\/(\d+)$/);
+      if (editMatch && request.method === "PUT") {
+        if (!env.DB) {
+          return jsonResponse({ error: "D1が接続されていないため編集できません。" }, 500);
+        }
+        let body;
+        try {
+          body = await request.json();
+        } catch {
+          return jsonResponse({ error: "リクエスト本文がJSONとして解釈できません。" }, 400);
+        }
+        try {
+          const { status, body: responseBody } = await handleEditTrade(env.DB, Number(editMatch[1]), body);
+          return jsonResponse(responseBody, status);
+        } catch (err) {
+          console.error(`[worker] PUT /api/trades/:id 失敗: ${err.message}`);
           return errorResponse(500);
         }
       }

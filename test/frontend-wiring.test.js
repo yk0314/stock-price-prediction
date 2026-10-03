@@ -36,3 +36,13 @@ test("ランキングの各銘柄に「買う」ボタン(data-action=buy-assist
   assert.match(app, /data-action="buy-assist" data-code="\$\{item\.code\}">買う<\/button>/);
   assert.match(app, /postJson\("\/api\/trades", \{\s*code: buyAssistTarget\.code,\s*transactionType: "buy"/);
 });
+
+test("売買履歴の各取引に「編集」ボタンがあり、編集は PUT /api/trades/:id を使う(取引種別・銘柄は編集欄に無い)", () => {
+  assert.match(app, /data-action="edit-trade" data-id="\$\{t\.id\}">編集<\/button>/);
+  assert.match(app, /putJson\(`\/api\/trades\/\$\{editTarget\.id\}`/);
+  const editModal = html.slice(html.indexOf('id="edit-trade-modal"'), html.indexOf('id="cancel-modal"'));
+  for (const id of ["edit-trade-quantity", "edit-trade-price", "edit-trade-date", "edit-trade-memo"]) {
+    assert.ok(editModal.includes(`id="${id}"`), id);
+  }
+  assert.ok(!/id="edit-trade-(code|type)"/.test(editModal), "銘柄・取引種別は編集できません");
+});

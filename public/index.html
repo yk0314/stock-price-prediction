@@ -252,6 +252,42 @@
     </div>
   </div>
 
+  <!-- 取引編集モーダル（登録済みのBUY/SELLを、SBI証券での実際の約定結果に合わせて修正する） -->
+  <div id="edit-trade-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="edit-trade-title">
+    <div class="modal-backdrop" data-modal-close></div>
+    <div class="modal-dialog glass">
+      <div class="modal-head">
+        <h3 id="edit-trade-title">取引を編集</h3>
+        <button type="button" class="modal-close" data-modal-close aria-label="閉じる">×</button>
+      </div>
+      <p class="assist-note">SBI証券での実際の約定結果に合わせて、数量・価格・取引日・メモを修正できます。保存すると、保有数量・平均取得価格・損益・通算成績は取引履歴から再計算されます。</p>
+      <div id="edit-trade-info" class="modal-info"></div>
+      <form id="edit-trade-form" class="modal-form">
+        <div class="form-row">
+          <label for="edit-trade-quantity">数量（株）</label>
+          <input type="number" id="edit-trade-quantity" required min="1" step="1" inputmode="numeric" />
+        </div>
+        <div class="form-row">
+          <label for="edit-trade-price">約定価格（円）</label>
+          <input type="number" id="edit-trade-price" required min="0" step="0.1" inputmode="decimal" />
+        </div>
+        <div class="form-row">
+          <label for="edit-trade-date">取引日</label>
+          <input type="date" id="edit-trade-date" required />
+        </div>
+        <div class="form-row">
+          <label for="edit-trade-memo">メモ（任意）</label>
+          <input type="text" id="edit-trade-memo" maxlength="500" />
+        </div>
+        <p id="edit-trade-message" class="form-message" role="alert"></p>
+        <div class="modal-actions">
+          <button type="button" class="ghost-button" data-modal-close>キャンセル</button>
+          <button type="submit" id="edit-trade-save" class="primary-button">変更を保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- 取消確認モーダル -->
   <div id="cancel-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="cancel-modal-title">
     <div class="modal-backdrop" data-modal-close></div>
