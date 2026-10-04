@@ -1,6 +1,9 @@
 import { config } from "./config.js";
-import { resolveCutoffDate } from "./cutoff.js";
+import { resolveLatestAvailableDate, jstDateString } from "./cutoff.js";
 import { JQuantsClient } from "./jquants.js";
+import { addDays, parseTradingCalendar, tradingDaysBetween, weekdayDates } from "./tradingCalendar.js";
+import { filterByListedMarket } from "./universe.js";
+import { buildPriceRow, syncStocksMaster, upsertPriceRows } from "./d1Sync.js";
 import { normalizeRawRows, groupByCode } from "./normalize.js";
 import { computeFeaturesForAll } from "./features.js";
 import { screenToPool, selectGeminiCandidates } from "./screening.js";
@@ -103,20 +106,82 @@ async function main() {
   // API呼び出し中に発生したエラー件数を種類別に集計する（検証項目「APIエラー数」用）。
   const apiErrorCounts = { jquantsFinancials: 0, topix: 0, gemini429OrError: 0, listedInfo: 0, heldCodesFetch: 0 };
 
-  // --- Stage 0: cutoffDate の決定（手動指定 or 自動計算） ---
+  // D1クライアントは先頭で1つだけ生成し、J-Quantsの再試行・失敗の記録、保有銘柄の取得、
+  // Gemini結果の即時保存、エラーログ記録の各所で使い回す
+  // (Stage 8のsaveToD1は従来通り独自にクライアントを生成する)。
+  const d1 = process.env.CF_D1_DATABASE_ID
+    ? new D1Client({
+        accountId: process.env.CF_ACCOUNT_ID,
+        databaseId: process.env.CF_D1_DATABASE_ID,
+        apiToken: process.env.CF_API_TOKEN,
+      })
+    : null;
+
+  // J-Quants APIの再試行(429/5xx/ネットワーク/タイムアウト)と失敗を溜めておき、あとでerror_logsへ記録する
+  // (クライアントのコールバックは同期のため、ここでは配列に積むだけにする)。
+  const jquantsEvents = [];
+  const flushJquantsEvents = async () => {
+    if (!d1 || jquantsEvents.length === 0) return;
+    const events = jquantsEvents.splice(0, jquantsEvents.length).slice(0, 50); // 1回の実行で記録するのは最大50件
+    for (const ev of events) {
+      try {
+        await logErrorToD1(d1, {
+          source: "jquants",
+          errorType: `${ev.type}_${ev.kind ?? "unknown"}`,
+          message: ev.message ?? "",
+          context: { path: ev.path, status: ev.status, attempt: ev.attempt, waitMs: ev.waitMs },
+        });
+      } catch {
+        // エラーログの記録自体が失敗しても、パイプライン全体は継続する
+      }
+    }
+  };
+
+  const jquants = new JQuantsClient(process.env.JQUANTS_API_KEY, {
+    onEvent: (ev) => jquantsEvents.push(ev),
+  });
+
+  // --- Stage 0: データ基準日(cutoffDate)の決定 ---
+  // 手動指定(CUTOFF_DATE)があればそれを使う。無ければ、J-Quantsから実際に取得できた「最新の取引日」を
+  // 動的に判定する(無料プランの「実行日-84日」のような固定値は使わない)。
+  // 取引日は取引カレンダー(/markets/calendar)で判定し、取得できなければ平日のみで判定する。
   const manualCutoff = process.env.CUTOFF_DATE || undefined;
-  const { cutoffDate, source } = resolveCutoffDate(manualCutoff);
-  console.log(`[pipeline] cutoffDate = ${cutoffDate} (source: ${source})`);
+  const todayJst = jstDateString(startedAt);
+  let tradingDays = [];
+  try {
+    const calendarRows = await jquants.fetchTradingCalendar(addDays(todayJst, -(config.FETCH_LOOKBACK_CALENDAR_DAYS + 40)), todayJst);
+    tradingDays = parseTradingCalendar(calendarRows);
+    console.log(`[pipeline] 取引カレンダー: 取引日${tradingDays.length}日分を取得`);
+  } catch (err) {
+    console.warn(`[pipeline] 取引カレンダーの取得に失敗したため、平日のみで取引日を判定します: ${err.message}`);
+  }
+
+  let resolved;
+  try {
+    resolved = await resolveLatestAvailableDate(jquants, { manualCutoffDate: manualCutoff, now: startedAt, tradingDays });
+  } catch (err) {
+    await flushJquantsEvents();
+    throw err;
+  }
+  const { cutoffDate, source } = resolved;
+  console.log(`[pipeline] cutoffDate(データ基準日) = ${cutoffDate} (source: ${source}${resolved.probes.length ? `, 確認した日付: ${resolved.probes.map((p) => `${p.date}=${p.outcome}`).join(" / ")}` : ""})`);
 
   const fetchStartDate = addDaysUTC(cutoffDate, -config.FETCH_LOOKBACK_CALENDAR_DAYS);
 
   // --- Stage 1: raw data — J-Quants から日付ベースで一括取得（1銘柄ずつのループは行わない） ---
-  // 全銘柄運用時もこの取得自体は変わらない（元々常に全銘柄分を取得しているため）。
-  const jquants = new JQuantsClient(process.env.JQUANTS_API_KEY);
-  const rawRows = await jquants.fetchDailyQuotesBulkForDateRange(
-    fetchStartDate,
-    cutoffDate
-  );
+  // 取引日(祝日を除く)だけを対象にし、最新日の判定で取得済みのデータは再取得せず使い回す。
+  const windowDates = tradingDays.length > 0
+    ? tradingDaysBetween(tradingDays, fetchStartDate, cutoffDate)
+    : weekdayDates(fetchStartDate, cutoffDate);
+  let rawRows;
+  try {
+    rawRows = await jquants.fetchDailyQuotesForDates(windowDates, cutoffDate, {
+      prefetched: resolved.rows ? { [cutoffDate]: resolved.rows } : {},
+    });
+  } catch (err) {
+    await flushJquantsEvents();
+    throw err;
+  }
   console.log(`[pipeline] raw data: ${rawRows.length}件（全銘柄・複数日分）`);
   await writeArtifact("raw-data.json", {
     cutoffDate,
@@ -148,6 +213,18 @@ async function main() {
     console.warn(`[pipeline] 銘柄マスタ取得に失敗したため、銘柄名は付与されないまま続行: ${err.message}`);
   }
 
+  // 銘柄マスタ(全銘柄)をD1のstocksへ同期する。新規・変更があった銘柄だけを書き込むため、日々の書き込みはほぼ0。
+  // (以前はスクリーニングプールの銘柄だけがD1に入っていた。ユニバース全体のマスタを持つことで、
+  //  バックテストや銘柄検索でプール外の銘柄も参照できる)
+  if (d1 && listedInfoByCode.size > 0) {
+    try {
+      const masterResult = await syncStocksMaster({ d1, listedInfoByCode });
+      console.log(`[pipeline] D1 銘柄マスタ同期: 全${masterResult.total}銘柄中、新規・変更${masterResult.written}件を書き込み`);
+    } catch (err) {
+      console.warn(`[pipeline] D1への銘柄マスタ同期に失敗(続行): ${err.message}`);
+    }
+  }
+
   // --- Stage 2: normalized data — 共通スキーマへの正規化 + 銘柄コードごとにグルーピング ---
   const normalizedRows = normalizeRawRows(rawRows);
   const groupedAll = groupByCode(normalizedRows);
@@ -158,7 +235,16 @@ async function main() {
   });
 
   // --- ユニバースフィルタ（phase1_subset: 10銘柄 / all: 全銘柄） ---
-  const grouped = applyUniverseFilter(groupedAll, universeMode);
+  let grouped = applyUniverseFilter(groupedAll, universeMode);
+  let marketFilterSummary = null;
+  if (universeMode === "all") {
+    // 「全銘柄」でも、ETF・REIT・TOKYO PRO MARKET等(市場区分: その他/TOKYO PRO MARKET)は
+    // 短期売買の対象外のため除外する(config.UNIVERSE_MARKETS / 環境変数 UNIVERSE_MARKETS で変更可能)
+    const marketFiltered = filterByListedMarket(grouped, listedInfoByCode, config.UNIVERSE_MARKETS);
+    grouped = marketFiltered.grouped;
+    marketFilterSummary = marketFiltered.summary;
+    console.log(`[pipeline] 市場区分フィルタ: ${JSON.stringify(marketFilterSummary)}`);
+  }
   console.log(
     `[pipeline] ユニバースフィルタ後: ${grouped.size}銘柄 (mode=${universeMode})`
   );
@@ -184,6 +270,8 @@ async function main() {
     console.log(
       `[pipeline] market(TOPIX): ${topixRows.length}件取得 / ${relativeStrengthDays}営業日騰落率=${topixChangeNd}`
     );
+    // 市場環境データのD1(index_prices)への蓄積は、始値・高値・安値を含む生データを使う scripts/sync-prices.js が行う
+    // (ここの topixRows は終値のみの正規化済みデータのため、保存すると始値等が欠けた行で上書きしてしまう)
   } catch (err) {
     // 市場データは補助的な特徴量であり、取得できなくてもパイプライン全体は継続できるようにする。
     apiErrorCounts.topix++;
@@ -214,17 +302,6 @@ async function main() {
   // （他のAPI取得失敗時と同じ「補助的な処理は失敗してもパイプライン全体を止めない」方針を踏襲）。
   const normalCandidateCodes = new Set(geminiCandidates.map((c) => c.code));
   const featureByCode = new Map(featureList.map((f) => [f.code, f]));
-
-  // D1クライアントはここで1つだけ生成し、保有銘柄の取得・Gemini結果の即時保存・
-  // エラーログ記録の3箇所で使い回す（Stage 8のsaveToD1は従来通り独自にクライアントを生成する。
-  // stocks/stock_prices/financialsの一括保存はそのままで問題ないため、そこは変更しない）。
-  const d1 = process.env.CF_D1_DATABASE_ID
-    ? new D1Client({
-        accountId: process.env.CF_ACCOUNT_ID,
-        databaseId: process.env.CF_D1_DATABASE_ID,
-        apiToken: process.env.CF_API_TOKEN,
-      })
-    : null;
 
   let heldExtraCandidates = [];
   let allHeldCodes = new Set();
@@ -337,14 +414,24 @@ async function main() {
   // 全銘柄×約41日分の生データをそのまま書き込むと数万行規模になり非現実的なため、
   // 「スクリーニングプール(pool)に残った銘柄」のみに限定する。
   // saveToD1()の第1引数metaは関数内で使われていないため、最小限の値だけ渡す。
-  const pricesByCodeForD1 = new Map(Object.entries(pricesByCode));
+  // stock_pricesは、全銘柄の蓄積(scripts/sync-prices.js)と同じ形式(始値・調整係数・売買代金を含む行)で、
+  // J-Quantsの生データからプール銘柄分を保存する(saveToD1には株価を渡さない)。
   const stocksForD1 = stocks.filter((s) => poolCodes.has(s.code));
   let d1Summary;
   try {
     d1Summary = await saveToD1(
       { cutoffDate, predictionExecutedAt },
-      { stocks: stocksForD1, pricesByCode: pricesByCodeForD1, financialsByCode }
+      { stocks: stocksForD1, pricesByCode: new Map(), financialsByCode }
     );
+    if (d1) {
+      const fetchedAtIso = new Date().toISOString();
+      const poolPriceRows = rawRows
+        .map((r) => buildPriceRow(r, fetchedAtIso))
+        .filter((row) => row && poolCodes.has(row[0]));
+      await upsertPriceRows(d1, poolPriceRows, { rowsPerRequest: config.PRICE_SYNC.rowsPerRequest });
+      d1Summary.stockPrices = poolPriceRows.length;
+      console.log(`[pipeline] D1 stock_prices(プール${poolCodes.size}銘柄): ${poolPriceRows.length}行を保存`);
+    }
   } catch (err) {
     console.warn(`[pipeline] D1: stocks / stock_prices / financials の事前保存に失敗（Gemini処理は続行）: ${err.message}`);
     d1Summary = {
@@ -452,6 +539,12 @@ async function main() {
     listedInfoCount: listedInfoByCode.size,
     topixChangeNd,
     apiErrorCounts,
+    // J-Quants有料化後に追加した情報(データ基準日の判定結果・取得量・使用プラン)
+    jquantsPlan: config.JQUANTS_PLAN,
+    latestDateProbes: resolved.probes,
+    tradingDayCountInWindow: windowDates.length,
+    marketFilter: marketFilterSummary,
+    jquantsStats: { ...jquants.stats },
   };
 
   // --- Stage 7: Cloudflare KV へ保存（ranking / analysis / history / meta） ---
@@ -479,6 +572,8 @@ async function main() {
       ...aiEvaluationFailures.map((f) => ({ stage: "ai_evaluations", code: f.code, error: f.error }))
     );
   }
+
+  await flushJquantsEvents(); // J-Quantsの再試行・失敗(あれば)をerror_logsへ記録
 
   console.log(
     `[pipeline] 完了。処理時間: ${(processingTimeMs / 1000 / 60).toFixed(1)}分`

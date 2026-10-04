@@ -30,8 +30,8 @@ concurrency:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    # 全銘柄モードのデータ取得(約15分) + 財務取得(約38分) + Gemini 150銘柄×30秒間隔(約76分以上)
-    # + 429/503リトライの余裕を見込んで240分。
+    # J-Quants(有料プラン: 株価約2分 + 財務152銘柄約3分) + Gemini 150銘柄×30秒間隔(約76分以上)
+    # + 429/503リトライの余裕を見込んで240分。(無料プランでは J-Quants だけで約50分かかっていた)
     # (1銘柄ごとにD1へ即時保存しているため、強制終了時もそこまでの成功分は失われない。)
     timeout-minutes: 240
     steps:
@@ -55,6 +55,13 @@ jobs:
           # schedule実行ではinputsが空になるため、その場合だけ全銘柄(all)にする。
           # 手動実行(workflow_dispatch)では入力値がそのまま使われる(既定はphase1_subset)。
           UNIVERSE_MODE: ${{ inputs.universeMode || 'all' }}
+          # --- J-Quants有料化後の設定(リポジトリ変数。未設定なら下記の既定値) ---
+          # JQUANTS_PLAN: free / light / standard / premium(既定 light)。プランに応じたリクエスト間隔になる
+          # UNIVERSE_MARKETS: 全銘柄モードの対象市場(カンマ区切り。既定 プライム,スタンダード,グロース。ALLで絞り込みなし)
+          # SCREENING_POOL_SIZE: スクリーニングで残す候補プールの件数(既定 150)
+          JQUANTS_PLAN: ${{ vars.JQUANTS_PLAN }}
+          UNIVERSE_MARKETS: ${{ vars.UNIVERSE_MARKETS }}
+          SCREENING_POOL_SIZE: ${{ vars.SCREENING_POOL_SIZE }}
           # --- Gemini関連の外部設定値 ---
           # 以前はconfig.js側でprocess.env.GEMINI_MAX_STOCKS等を読む実装だけがあり、
           # ここ(ワークフロー定義)でリポジトリ変数をenvへ配線していなかったため、

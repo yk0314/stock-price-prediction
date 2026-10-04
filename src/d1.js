@@ -4,6 +4,20 @@
 
 const D1_API_BASE = "https://api.cloudflare.com/client/v4";
 
+/**
+ * JSON配列を1つのバインド変数として渡し、SQLite組み込みの json_each で展開して upsert するSQLを作る。
+ *   INSERT OR REPLACE INTO t (a, b) SELECT json_extract(j.value, '$[0]'), json_extract(j.value, '$[1]') FROM json_each(?) AS j
+ * D1は「1つのSQL文のバインド変数は100個まで」という制約があり、通常のVALUES句では1リクエストあたり
+ * 100÷列数(株価なら11列で9行)しか書き込めない。この方法なら1リクエストで数百行を書き込める
+ * (JSON文字列は1つのバインド変数として数える)。
+ * @param {string} table
+ * @param {string[]} columns
+ */
+export function buildJsonUpsertSql(table, columns) {
+  const selects = columns.map((_, i) => `json_extract(j.value, '$[${i}]')`).join(", ");
+  return `INSERT OR REPLACE INTO ${table} (${columns.join(", ")}) SELECT ${selects} FROM json_each(?) AS j`;
+}
+
 export class D1Client {
   constructor({ accountId, databaseId, apiToken }) {
     if (!accountId || !databaseId || !apiToken) {
@@ -14,6 +28,9 @@ export class D1Client {
     this.accountId = accountId;
     this.databaseId = databaseId;
     this.apiToken = apiToken;
+    // 実行中のD1の使用量(リクエスト数・書き込み行数)。D1が返す meta.rows_written を積算する。
+    // 無料枠(書き込み1日10万行)の予算管理に使う。
+    this.stats = { requests: 0, rowsWritten: 0, rowsRead: 0 };
   }
 
   async run(sql, params = []) {
@@ -37,7 +54,11 @@ export class D1Client {
       throw new Error(`D1クエリ失敗: ${JSON.stringify(json.errors ?? json)}`);
     }
     const first = Array.isArray(json.result) ? json.result[0] : json.result;
-    return { results: first?.results ?? [], meta: first?.meta ?? {} };
+    const meta = first?.meta ?? {};
+    this.stats.requests++;
+    this.stats.rowsWritten += Number(meta.rows_written ?? meta.changes ?? 0) || 0;
+    this.stats.rowsRead += Number(meta.rows_read ?? 0) || 0;
+    return { results: first?.results ?? [], meta };
   }
 
   async query(sql, params = []) {
@@ -67,13 +88,6 @@ export class D1Client {
     const columnList = columns.join(", ");
     let written = 0;
 
-    // ▼▼▼ 一時デバッグ（原因特定用。確認後に削除すること） ▼▼▼
-    let debugTotalRequested = 0;
-    let debugTotalChanges = 0;
-    let debugChunkIndex = 0;
-    const debugTotalChunks = Math.ceil(rows.length / effectiveChunkSize);
-    // ▲▲▲ 一時デバッグここまで ▲▲▲
-
     for (let i = 0; i < rows.length; i += effectiveChunkSize) {
       const chunk = rows.slice(i, i + effectiveChunkSize);
       const placeholders = chunk
@@ -81,44 +95,29 @@ export class D1Client {
         .join(", ");
       const params = chunk.flat();
 
-      // ▼▼▼ 一時デバッグ（原因特定用。確認後に削除すること） ▼▼▼
-      debugChunkIndex++;
-      debugTotalRequested += chunk.length;
-      try {
-        const { meta } = await this.run(
-          `INSERT OR REPLACE INTO ${table} (${columnList}) VALUES ${placeholders}`,
-          params
-        );
-        const changes = meta?.changes ?? null;
-        if (changes !== null) debugTotalChanges += changes;
-        // 全チャンクを出すとログが膨大になるため、table=stock_pricesの時だけ・
-        // 最初の3件と、requested!==changesの異常時だけ詳細ログを出す
-        if (table === "stock_prices" && (debugChunkIndex <= 3 || changes !== chunk.length)) {
-          console.log(
-            `[DEBUG-D1] batchInsertOrReplace(${table}) chunk ${debugChunkIndex}/${debugTotalChunks}: ` +
-              `requested=${chunk.length}, meta.changes=${changes}, success=true`
-          );
-        }
-      } catch (err) {
-        console.log(
-          `[DEBUG-D1] batchInsertOrReplace(${table}) chunk ${debugChunkIndex}/${debugTotalChunks}: ` +
-            `requested=${chunk.length}, success=false, error=${err.message}`
-        );
-        throw err;
-      }
-      // ▲▲▲ 一時デバッグここまで ▲▲▲
-
+      await this.run(`INSERT OR REPLACE INTO ${table} (${columnList}) VALUES ${placeholders}`, params);
       written += chunk.length;
     }
 
-    // ▼▼▼ 一時デバッグ（原因特定用。確認後に削除すること） ▼▼▼
-    if (table === "stock_prices") {
-      console.log(
-        `[DEBUG-D1] batchInsertOrReplace(${table}) 合計: requested=${debugTotalRequested} / actualChanges=${debugTotalChanges}`
-      );
-    }
-    // ▲▲▲ 一時デバッグここまで ▲▲▲
+    return written;
+  }
 
+  /**
+   * 大量の行を、JSON一括(json_each)でupsert(INSERT OR REPLACE)する。
+   * batchInsertOrReplace と同じ結果になるが、1リクエストで書き込める行数が桁違いに多い
+   * (株価: 11列で 9行 → 200行)ため、全銘柄の日足(1日約4,400行)を数十リクエストで書き込める。
+   * 主キーが同じ行は上書きされるため、同じ日付を再実行しても重複しない。
+   * @returns {Promise<number>} 書き込もうとした行数
+   */
+  async bulkUpsertJson(table, columns, rows, { rowsPerRequest = 200 } = {}) {
+    if (rows.length === 0) return 0;
+    const sql = buildJsonUpsertSql(table, columns);
+    let written = 0;
+    for (let i = 0; i < rows.length; i += rowsPerRequest) {
+      const chunk = rows.slice(i, i + rowsPerRequest);
+      await this.run(sql, [JSON.stringify(chunk)]);
+      written += chunk.length;
+    }
     return written;
   }
 }
