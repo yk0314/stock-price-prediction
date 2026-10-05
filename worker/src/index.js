@@ -299,6 +299,38 @@ async function buildStockLookupMaps(kv) {
   return { priceByCode, nameByCode, dataAsOfByCode };
 }
 
+/**
+ * KVのstocks一覧に無い銘柄の「現在価格・データ基準日・銘柄名」を、D1から補う。
+ * KVのstocksは直近の実行の対象銘柄だけのことがある(phase1_subsetの手動実行や、全銘柄モードの市場区分フィルタ後など)。
+ * 保有銘柄でも一覧に無ければ現在価格が出なくなるため、D1の株価(stock_prices)の最新の終値と、銘柄マスタ(stocks)で補う。
+ * 引数のMapを直接更新する。KVに値がある銘柄は変更しない。
+ */
+async function fillMissingStockInfoFromD1(db, codes, { priceByCode, nameByCode, dataAsOfByCode }) {
+  for (const code of new Set(codes)) {
+    const needsPrice = priceByCode.get(code) === undefined || priceByCode.get(code) === null;
+    const needsName = !nameByCode.get(code);
+    if (!needsPrice && !needsName) continue;
+    try {
+      if (needsPrice) {
+        const row = await db
+          .prepare(`SELECT close, date FROM stock_prices WHERE code = ? ORDER BY date DESC LIMIT 1`)
+          .bind(code)
+          .first();
+        if (row) {
+          priceByCode.set(code, row.close);
+          dataAsOfByCode.set(code, row.date);
+        }
+      }
+      if (needsName) {
+        const row = await db.prepare(`SELECT name FROM stocks WHERE code = ?`).bind(code).first();
+        if (row?.name) nameByCode.set(code, row.name);
+      }
+    } catch (err) {
+      console.error(`[worker] D1からの株価・銘柄名の補完に失敗 code=${code}: ${err.message}`);
+    }
+  }
+}
+
 const VALID_TRANSACTION_TYPES = new Set(["buy", "sell"]);
 
 /**
@@ -331,7 +363,11 @@ async function handleCreateTrade(db, kv, body) {
 
   const { nameByCode } = await buildStockLookupMaps(kv);
   if (!nameByCode.has(code)) {
-    return { status: 400, body: { error: "銘柄コードが存在しません。コードを確認してください。" } };
+    // KVのstocksは直近の実行の対象銘柄だけのことがあるため、D1の銘柄マスタ(全上場銘柄)でも確認する
+    const listed = await db.prepare(`SELECT code FROM stocks WHERE code = ?`).bind(code).first();
+    if (!listed) {
+      return { status: 400, body: { error: "銘柄コードが存在しません。コードを確認してください。" } };
+    }
   }
 
   if (transactionType === "sell") {
@@ -760,10 +796,12 @@ export default {
         try {
           const codeFilter = url.searchParams.get("code") || undefined;
           const includeCanceled = url.searchParams.get("includeCanceled") === "1";
-          const [allTradeRows, { priceByCode }] = await Promise.all([
+          const [allTradeRows, stockMaps] = await Promise.all([
             fetchAllTradeRows(env.DB, codeFilter, { includeCanceled }),
             buildStockLookupMaps(env.STOCK_KV),
           ]);
+          const { priceByCode } = stockMaps;
+          await fillMissingStockInfoFromD1(env.DB, allTradeRows.map((t) => t.code), stockMaps);
           // buildTradeHistoryは銘柄ごとの移動平均計算のために「その銘柄の全履歴」が必要なため、
           // ?codeで絞り込んでいてもfetchAllTradeRows自体はcode指定のWHERE句で完結しており問題ない
           // （他銘柄の履歴が無くても、その銘柄1つの計算は正しく行える）。
@@ -781,11 +819,13 @@ export default {
       if (path === "/api/holdings") {
         if (!env.DB) return jsonResponse([]);
         try {
-          const [allTradeRows, { priceByCode, nameByCode, dataAsOfByCode }] = await Promise.all([
+          const [allTradeRows, stockMaps] = await Promise.all([
             fetchAllTradeRows(env.DB),
             buildStockLookupMaps(env.STOCK_KV),
           ]);
+          const { priceByCode, nameByCode, dataAsOfByCode } = stockMaps;
           const holdingCodes = listHoldingCodes(allTradeRows);
+          await fillMissingStockInfoFromD1(env.DB, holdingCodes, stockMaps);
           const evaluationEntries = await Promise.all(
             holdingCodes.map(async (code) => {
               const recent = await fetchRecentEvaluationsForCode(env.DB, code, 2);

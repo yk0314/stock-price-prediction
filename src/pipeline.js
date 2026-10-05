@@ -3,7 +3,7 @@ import { resolveLatestAvailableDate, jstDateString } from "./cutoff.js";
 import { JQuantsClient } from "./jquants.js";
 import { addDays, parseTradingCalendar, tradingDaysBetween, weekdayDates } from "./tradingCalendar.js";
 import { filterByListedMarket } from "./universe.js";
-import { buildPriceRow, syncStocksMaster, upsertPriceRows } from "./d1Sync.js";
+import { buildPriceRow, filterUnsyncedPriceRows, loadSyncedDates, syncStocksMaster, upsertPriceRows } from "./d1Sync.js";
 import { normalizeRawRows, groupByCode } from "./normalize.js";
 import { computeFeaturesForAll } from "./features.js";
 import { screenToPool, selectGeminiCandidates } from "./screening.js";
@@ -305,10 +305,26 @@ async function main() {
 
   let heldExtraCandidates = [];
   let allHeldCodes = new Set();
+  let heldOnlyFeatures = []; // ユニバースの外にある保有銘柄の特徴量(スクリーニングの対象には加えない)
   if (d1) {
     try {
       const heldCodes = await fetchHeldCodes(d1);
       allHeldCodes = new Set(heldCodes);
+
+      // 保有銘柄は、ユニバースの外(phase1_subsetの10銘柄・全銘柄モードの市場区分フィルタで除外された銘柄など)にあっても
+      // 毎日再評価できるよう、株価データ(groupedAll)があれば、特徴量をここで別途計算する。
+      // (計算できないと「特徴量計算不可のためスキップ」になり、保有しているのに再評価されなくなる)
+      const outsideHeld = heldCodes.filter((code) => !featureByCode.has(code) && groupedAll.has(code));
+      if (outsideHeld.length > 0) {
+        heldOnlyFeatures = computeFeaturesForAll(new Map(outsideHeld.map((code) => [code, groupedAll.get(code)])));
+        for (const f of heldOnlyFeatures) {
+          f.relativeStrength20d = computeRelativeStrength(f.priceChange20d, topixChangeNd);
+          featureByCode.set(f.code, f);
+        }
+        console.log(
+          `[pipeline] ユニバース外の保有銘柄${outsideHeld.length}件の特徴量を別途計算: ${heldOnlyFeatures.length}件で計算成功`
+        );
+      }
       const selection = selectHeldExtraCandidates(heldCodes, normalCandidateCodes, featureByCode);
       heldExtraCandidates = selection.heldExtraCandidates;
       console.log(
@@ -372,7 +388,8 @@ async function main() {
   // 銘柄一覧（KV向け。1件のJSON blobとして保存するため、プールに関わらず
   // 特徴量が計算できた全銘柄分を含めてよい。全銘柄運用時は数千件になりうるが、
   // KVの1バリューあたりの上限(25MB)には収まる想定で、書き込み回数も1回のまま増えない）。
-  const stocks = featureList.map((f) => {
+  // 保有銘柄(ユニバース外のものを含む)も含める。保有銘柄画面の現在価格・銘柄名がこの一覧に依存するため。
+  const stocks = [...featureList, ...heldOnlyFeatures].map((f) => {
     const info = listedInfoByCode.get(f.code);
     return {
       code: f.code,
@@ -425,12 +442,24 @@ async function main() {
     );
     if (d1) {
       const fetchedAtIso = new Date().toISOString();
-      const poolPriceRows = rawRows
+      const poolRowsAll = rawRows
         .map((r) => buildPriceRow(r, fetchedAtIso))
         .filter((row) => row && poolCodes.has(row[0]));
+      // 全銘柄の蓄積(sync-prices.js)が完了している日付は、そちらが保存済みのため二重に書き込まない(D1の書き込み行数の節約)。
+      // 蓄積済みの日付を取得できなければ、従来どおり全件を書き込む。
+      let syncedDates = new Set();
+      try {
+        syncedDates = await loadSyncedDates(d1);
+      } catch (syncErr) {
+        console.warn(`[pipeline] D1 price_sync_dates を読めないため、プール銘柄の株価は全件書き込みます: ${syncErr.message}`);
+      }
+      const poolPriceRows = filterUnsyncedPriceRows(poolRowsAll, syncedDates);
       await upsertPriceRows(d1, poolPriceRows, { rowsPerRequest: config.PRICE_SYNC.rowsPerRequest });
       d1Summary.stockPrices = poolPriceRows.length;
-      console.log(`[pipeline] D1 stock_prices(プール${poolCodes.size}銘柄): ${poolPriceRows.length}行を保存`);
+      console.log(
+        `[pipeline] D1 stock_prices(プール${poolCodes.size}銘柄): ${poolPriceRows.length}行を保存` +
+          `（蓄積済みの日付の${poolRowsAll.length - poolPriceRows.length}行は省略）`
+      );
     }
   } catch (err) {
     console.warn(`[pipeline] D1: stocks / stock_prices / financials の事前保存に失敗（Gemini処理は続行）: ${err.message}`);

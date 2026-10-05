@@ -11,7 +11,7 @@
     "pipeline": "node src/pipeline.js",
     "sync-prices": "node scripts/sync-prices.js",
     "probe-jquants": "node scripts/probe-jquants.mjs",
-    "test": "node test/unit.test.js && node --test test/trade-logic.test.js test/order-assist.test.js test/frontend-wiring.test.js test/jquants-paid.test.js test/d1-sync.test.js"
+    "test": "node test/unit.test.js && node --test test/trade-logic.test.js test/order-assist.test.js test/frontend-wiring.test.js test/jquants-paid.test.js test/d1-sync.test.js test/worker-d1-fallback.test.js"
   },
   "dependencies": {}
 }
