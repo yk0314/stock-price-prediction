@@ -67,6 +67,10 @@ async function main() {
   }
 
   // 3) 株価の差分蓄積
+  // 書き込み予算は、この実行全体(銘柄マスタ・TOPIX・株式分割の再取得を含む)の上限として数える。
+  // 銘柄マスタ等で既に使った分と、後続(TOPIX・再取得)のための余裕(RESERVED_WRITES)を引いた残りを株価に使う。
+  const RESERVED_WRITES = 3000;
+  const priceBudget = Math.max(0, dailyWriteBudget - d1.stats.rowsWritten - RESERVED_WRITES);
   let priceResult;
   try {
     priceResult = await syncPrices({
@@ -74,7 +78,7 @@ async function main() {
       d1,
       tradingDays: targetDays,
       prefetched: resolved.rows ? { [latestDate]: resolved.rows } : {},
-      writeBudget: dailyWriteBudget,
+      writeBudget: priceBudget,
       rowsPerRequest,
     });
   } catch (err) {
@@ -102,7 +106,7 @@ async function main() {
       toDate: latestDate,
       latestDate,
       maxCodes: maxSplitRepairCodes,
-      writeBudget: Math.max(0, dailyWriteBudget - priceResult.rowsWritten),
+      writeBudget: Math.max(0, dailyWriteBudget - d1.stats.rowsWritten),
       rowsPerRequest,
     });
   }

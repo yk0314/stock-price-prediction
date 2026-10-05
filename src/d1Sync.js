@@ -94,6 +94,14 @@ async function markDateSynced(d1, date, rowCount, nowIso) {
   await d1.run("INSERT OR REPLACE INTO price_sync_dates (date, row_count, synced_at) VALUES (?, ?, ?)", [date, rowCount, nowIso]);
 }
 
+/**
+ * 株価行(PRICE_COLUMNSの順の配列)のうち、全銘柄の蓄積が完了している日付(price_sync_dates)の行を除く。
+ * pipeline.jsがプール銘柄の株価を毎日書き込むとき、蓄積済みの日付を二重に書き込まない(D1の書き込み行数の節約)ために使う。
+ */
+export function filterUnsyncedPriceRows(rows, syncedDates) {
+  return rows.filter((row) => !syncedDates.has(row[1]));
+}
+
 export async function upsertPriceRows(d1, rows, { rowsPerRequest = 200 } = {}) {
   return d1.bulkUpsertJson("stock_prices", PRICE_COLUMNS, rows, { rowsPerRequest });
 }
@@ -171,11 +179,44 @@ export async function syncPrices({
   };
 }
 
+// J-Quantsの株価は日本時間16:30頃に更新される。この時刻より前に取得した「分割日より前の日付」の行は、
+// 分割の調整が反映されていない古い基準の値(=過去の調整後株価と食い違う)である。UTCでは 07:30。
+export const PRICE_PUBLISH_UTC_TIME = "T07:30:00.000Z";
+
+/**
+ * 調整(AdjFactor≠1)があった銘柄のうち、「調整が反映される前に取得した古い行」がD1に残っている銘柄だけを返す。
+ * そのような行が無い銘柄(例: 初回の蓄積で、調整後にすべて取得した場合)は、再取得しても値が変わらないため不要。
+ * @param {object} d1
+ * @param {Array<[string, string]>} entries [code, exDate]
+ * @returns {Promise<Set<string>>} 再取得が必要な銘柄コード
+ */
+export async function findCodesWithStaleRows(d1, entries) {
+  const byExDate = new Map();
+  for (const [code, exDate] of entries) {
+    if (!byExDate.has(exDate)) byExDate.set(exDate, []);
+    byExDate.get(exDate).push(code);
+  }
+  const stale = new Set();
+  for (const [exDate, codes] of byExDate) {
+    for (let i = 0; i < codes.length; i += 80) {
+      const chunk = codes.slice(i, i + 80);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = await d1.query(
+        `SELECT DISTINCT code FROM stock_prices WHERE code IN (${placeholders}) AND date < ? AND fetched_at < ?`,
+        [...chunk, exDate, `${exDate}${PRICE_PUBLISH_UTC_TIME}`]
+      );
+      for (const r of rows) stale.add(r.code);
+    }
+  }
+  return stale;
+}
+
 /**
  * 株式分割等で過去の調整後株価が変わった銘柄の履歴を、期間全体で再取得して上書きする。
  * J-Quantsの調整後株価(AdjC等)は、分割があると過去分もさかのぼって再計算されるため、
  * 以前に蓄積した古い行と新しい行で値の基準がずれるのを防ぐ。
- * 直近(recentDays日以内)に調整があった銘柄だけが対象(古い分割は、蓄積時点で既に反映済みのため不要)。
+ * 対象は、直近(recentDays日以内)に調整があり、かつ、調整の反映前に取得した古い行がD1に残っている銘柄だけ
+ * (古い分割や、すべて調整後に取得した銘柄は、再取得しても値が変わらないため不要)。
  */
 export async function repairAdjustedHistory({
   client,
@@ -192,8 +233,10 @@ export async function repairAdjustedHistory({
   log = (m) => console.log(m),
 }) {
   const threshold = addDays(latestDate, -recentDays);
-  const targets = [...adjusted.entries()]
-    .filter(([, exDate]) => exDate >= threshold)
+  const recent = [...adjusted.entries()].filter(([, exDate]) => exDate >= threshold);
+  const stale = recent.length > 0 ? await findCodesWithStaleRows(d1, recent) : new Set();
+  const targets = recent
+    .filter(([code]) => stale.has(code))
     .sort((a, b) => (a[1] < b[1] ? 1 : -1))
     .slice(0, maxCodes);
   const startWrites = d1.stats.rowsWritten;
@@ -212,7 +255,7 @@ export async function repairAdjustedHistory({
     repaired.push({ code, exDate, rows: priceRows.length });
     log(`[d1Sync] 株式分割等の調整(${exDate})があった ${code} の履歴を再取得: ${priceRows.length}行`);
   }
-  return { candidates: adjusted.size, repaired, stoppedBy };
+  return { candidates: adjusted.size, recent: recent.length, stale: stale.size, repaired, stoppedBy };
 }
 
 /** 指数(TOPIX)の日足を、J-Quantsの生レコードからindex_pricesの行(配列)にする。 */

@@ -6,6 +6,7 @@ import {
   buildIndexRows,
   buildPriceRow,
   diffStocks,
+  filterUnsyncedPriceRows,
   findAdjustedCodes,
   planMissingDates,
   repairAdjustedHistory,
@@ -63,6 +64,12 @@ test("差分: 未蓄積の取引日だけを、新しい日付から順に返す
   const days = ["2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01"];
   assert.deepEqual(planMissingDates(days, new Set(["2026-09-29"])), ["2026-10-01", "2026-09-30", "2026-09-28"]);
   assert.deepEqual(planMissingDates(days, new Set(days)), []);
+});
+
+test("パイプラインのプール株価: 全銘柄の蓄積が完了している日付の行は、二重に書き込まない", () => {
+  const rows = [buildPriceRow({ ...RAW, Date: "2026-10-01" }, "T"), buildPriceRow({ ...RAW, Date: "2026-10-02" }, "T"), buildPriceRow({ ...RAW, Date: "2026-09-30" }, "T")];
+  assert.deepEqual(filterUnsyncedPriceRows(rows, new Set(["2026-10-02", "2026-10-01"])).map((r) => r[1]), ["2026-09-30"]);
+  assert.equal(filterUnsyncedPriceRows(rows, new Set()).length, 3); // 蓄積済みの日付を読めないとき(空)は全件
 });
 
 test("銘柄マスタの差分: 新規・銘柄名や市場区分の変更だけが書き込み対象", () => {
@@ -269,33 +276,61 @@ sqliteTest("取得済み(prefetched)の日付はJ-Quantsに再問い合わせし
   assert.equal(client.calls.dates.length, 0);
 });
 
-sqliteTest("株式分割: 検出した銘柄の履歴を再取得して上書きする。古い調整や上限を超える銘柄は対象外", async () => {
+sqliteTest("株式分割: 調整の反映前に取得した古い行が残っている銘柄だけ、履歴を再取得して上書きする", async () => {
   const sqlite = newDb();
   const d1 = new FakeD1(sqlite);
-  // 以前に蓄積した(分割前の基準の)古い行
+  const COLS = ["code", "date", "open", "high", "low", "close", "volume", "data_source", "fetched_at", "adj_factor", "turnover"];
+  // 以前(分割の反映前=ex日の16:30 JSTより前)に蓄積した、古い基準の行
   const oldRows = ["2026-09-01", "2026-09-02"].flatMap((d) => dayRows(d, 1, { Code: "99840", AdjC: 4000, C: 4000 }));
-  await d1.bulkUpsertJson("stock_prices", ["code", "date", "open", "high", "low", "close", "volume", "data_source", "fetched_at", "adj_factor", "turnover"], oldRows.map((r) => buildPriceRow(r, "old")));
-  // 新しい日に分割(AdjFactor 0.25)が反映された
+  await d1.bulkUpsertJson("stock_prices", COLS, oldRows.map((r) => buildPriceRow(r, "2026-09-03T00:00:00.000Z")));
+  // 新しい日に分割(AdjFactor 0.25)が反映された。別の銘柄(1111)も同日に調整されたが、D1の行はすべて調整後に取得したもの
   const exDay = "2026-10-02";
-  const day = dayRows(exDay, 3).concat([{ ...dayRows(exDay, 1)[0], Code: "99840", AdjFactor: 0.25, AdjC: 1000, C: 4000 }]);
+  await d1.bulkUpsertJson("stock_prices", COLS, [buildPriceRow({ ...dayRows("2026-09-20", 1)[0], Code: "11110" }, "2026-10-03T00:00:00.000Z")]);
+  const day = dayRows(exDay, 3).concat([
+    { ...dayRows(exDay, 1)[0], Code: "99840", AdjFactor: 0.25, AdjC: 1000, C: 4000 },
+    { ...dayRows(exDay, 1)[0], Code: "11110", AdjFactor: 0.5, AdjC: 500, C: 1000 },
+  ]);
   const sync = await syncPrices({ client: fakeClient({ [exDay]: day }), d1, tradingDays: [exDay], writeBudget: 1e6, log: () => {} });
-  assert.deepEqual([...sync.adjusted.entries()], [["9984", exDay]]);
+  assert.deepEqual([...sync.adjusted.entries()].sort(), [["1111", exDay], ["9984", exDay]]);
 
   const corrected = ["2026-09-01", "2026-09-02", exDay].map((d) => ({ ...dayRows(d, 1)[0], Code: "99840", AdjC: 1000, AdjO: 1000, AdjH: 1100, AdjL: 900 }));
-  const client = fakeClient({}, { 9984: corrected });
+  const client = fakeClient({}, { 9984: corrected, 1111: [] });
   const repair = await repairAdjustedHistory({ client, d1, adjusted: sync.adjusted, fromDate: "2026-09-01", toDate: exDay, latestDate: exDay, maxCodes: 20, writeBudget: 1e6, log: () => {} });
-  assert.deepEqual(repair.repaired.map((r) => r.code), ["9984"]);
-  assert.deepEqual(client.calls.codes, ["9984"]);
+  assert.deepEqual(repair.repaired.map((r) => r.code), ["9984"]); // 古い行が残っているのは9984だけ
+  assert.equal(repair.recent, 2);
+  assert.equal(repair.stale, 1);
+  assert.deepEqual(client.calls.codes, ["9984"]); // 1111はAPIを呼ばない(再取得しても値が変わらない)
   const closes = sqlite.prepare("SELECT close FROM stock_prices WHERE code='9984' ORDER BY date").all().map((r) => r.close);
   assert.deepEqual(closes, [1000, 1000, 1000]); // 古い行も分割後の基準に揃う
 
-  // 古い調整(30日より前)・上限を超える銘柄は再取得しない
-  const old = await repairAdjustedHistory({ client: fakeClient({}), d1, adjusted: new Map([["1111", "2026-01-05"]]), fromDate: "2026-01-01", toDate: exDay, latestDate: exDay, maxCodes: 20, writeBudget: 1e6, log: () => {} });
+  // 古い調整(30日より前)は対象外 / 古い行があっても、上限(maxCodes)までを新しい調整から
+  const old = await repairAdjustedHistory({ client: fakeClient({}), d1, adjusted: new Map([["9984", "2026-01-05"]]), fromDate: "2026-01-01", toDate: exDay, latestDate: exDay, maxCodes: 20, writeBudget: 1e6, log: () => {} });
   assert.equal(old.repaired.length, 0);
+  assert.equal(old.recent, 0);
+  for (const code of ["2001", "2002", "2003"]) {
+    await d1.bulkUpsertJson("stock_prices", COLS, [buildPriceRow({ ...dayRows("2026-09-10", 1)[0], Code: `${code}0` }, "2026-09-11T00:00:00.000Z")]);
+  }
   const limited = fakeClient({});
-  const lim = await repairAdjustedHistory({ client: limited, d1, adjusted: new Map([["1111", "2026-10-01"], ["2222", "2026-10-02"], ["3333", "2026-09-30"]]), fromDate: "2026-09-01", toDate: exDay, latestDate: exDay, maxCodes: 2, writeBudget: 1e6, log: () => {} });
-  assert.equal(lim.repaired.length, 2);
-  assert.deepEqual(limited.calls.codes, ["2222", "1111"]); // 新しい調整から
+  const lim = await repairAdjustedHistory({ client: limited, d1, adjusted: new Map([["2001", "2026-10-01"], ["2002", "2026-10-02"], ["2003", "2026-09-30"]]), fromDate: "2026-09-01", toDate: exDay, latestDate: exDay, maxCodes: 2, writeBudget: 1e6, log: () => {} });
+  assert.equal(lim.stale, 3);
+  assert.deepEqual(limited.calls.codes, ["2002", "2001"]); // 新しい調整から2件
+});
+
+sqliteTest("株式分割: 初回の蓄積のようにすべて調整後に取得した行だけなら、再取得(API呼び出し・書き込み)をしない", async () => {
+  const sqlite = newDb();
+  const d1 = new FakeD1(sqlite);
+  const exDay = "2026-09-29";
+  const dates = ["2026-09-24", "2026-09-25", "2026-09-28", exDay];
+  const split = (d) => ({ ...dayRows(d, 1)[0], Code: "99870", AdjFactor: d === exDay ? 0.5 : 1 });
+  const sync = await syncPrices({ client: fakeClient(Object.fromEntries(dates.map((d) => [d, [split(d)]]))), d1, tradingDays: dates, writeBudget: 1e6, log: () => {}, nowIso: () => "2026-10-04T09:00:00.000Z" });
+  assert.equal(sync.adjusted.size, 1);
+  const client = fakeClient({});
+  const writesBefore = d1.stats.rowsWritten;
+  const repair = await repairAdjustedHistory({ client, d1, adjusted: sync.adjusted, fromDate: "2026-09-24", toDate: exDay, latestDate: exDay, maxCodes: 20, writeBudget: 1e6, log: () => {} });
+  assert.equal(repair.stale, 0);
+  assert.deepEqual(repair.repaired, []);
+  assert.equal(client.calls.codes.length, 0);
+  assert.equal(d1.stats.rowsWritten, writesBefore);
 });
 
 sqliteTest("TOPIX: 初回は期間全体、2回目以降は保存済みの最終日の少し前から取得して上書きする", async () => {
