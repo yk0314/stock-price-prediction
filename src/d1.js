@@ -18,6 +18,25 @@ export function buildJsonUpsertSql(table, columns) {
   return `INSERT OR REPLACE INTO ${table} (${columns.join(", ")}) SELECT ${selects} FROM json_each(?) AS j`;
 }
 
+/** D1の無料枠の「1日あたりの書き込み行数」の上限を超えたときのエラーメッセージかどうか。 */
+export function isQuotaExceededMessage(text) {
+  return /exceeded D1's free tier daily row write limit|"code"\s*:\s*7500/.test(String(text ?? ""));
+}
+
+/**
+ * D1の書き込み上限(無料枠: 1日10万行)に達したことを表すエラー。
+ * 一度これが発生したら、同じクライアントからの以降の書き込みは、ネットワークに出さず即座にこのエラーになる
+ * (毎回失敗する書き込みを繰り返さない。上限はUTCの0時=日本時間9時にリセットされる)。読み取りは続けられる。
+ */
+export class D1QuotaError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "D1QuotaError";
+  }
+}
+
+const WRITE_STATEMENT = /^\s*(insert|update|delete|replace|create|drop|alter)\b/i;
+
 export class D1Client {
   constructor({ accountId, databaseId, apiToken }) {
     if (!accountId || !databaseId || !apiToken) {
@@ -30,10 +49,13 @@ export class D1Client {
     this.apiToken = apiToken;
     // 実行中のD1の使用量(リクエスト数・書き込み行数)。D1が返す meta.rows_written を積算する。
     // 無料枠(書き込み1日10万行)の予算管理に使う。
-    this.stats = { requests: 0, rowsWritten: 0, rowsRead: 0 };
+    this.stats = { requests: 0, rowsWritten: 0, rowsRead: 0, quotaExceeded: false };
   }
 
   async run(sql, params = []) {
+    if (this.stats.quotaExceeded && WRITE_STATEMENT.test(sql)) {
+      throw new D1QuotaError("D1の1日あたりの書き込み上限に達しているため、書き込みを行いません(UTCの0時にリセットされます)");
+    }
     const url = `${D1_API_BASE}/accounts/${this.accountId}/d1/database/${this.databaseId}/query`;
     const res = await fetch(url, {
       method: "POST",
@@ -46,11 +68,19 @@ export class D1Client {
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
+      if (isQuotaExceededMessage(body)) {
+        this.stats.quotaExceeded = true;
+        throw new D1QuotaError(`D1の書き込み上限に達しました (${res.status}): ${body}`);
+      }
       throw new Error(`D1クエリ失敗 (${res.status}): ${body}`);
     }
 
     const json = await res.json();
     if (!json.success) {
+      if (isQuotaExceededMessage(JSON.stringify(json.errors ?? json))) {
+        this.stats.quotaExceeded = true;
+        throw new D1QuotaError(`D1の書き込み上限に達しました: ${JSON.stringify(json.errors ?? json)}`);
+      }
       throw new Error(`D1クエリ失敗: ${JSON.stringify(json.errors ?? json)}`);
     }
     const first = Array.isArray(json.result) ? json.result[0] : json.result;

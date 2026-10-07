@@ -4,6 +4,7 @@ import { JQuantsClient } from "./jquants.js";
 import { addDays, parseTradingCalendar, tradingDaysBetween, weekdayDates } from "./tradingCalendar.js";
 import { filterByListedMarket } from "./universe.js";
 import { buildPriceRow, filterUnsyncedPriceRows, loadSyncedDates, syncStocksMaster, upsertPriceRows } from "./d1Sync.js";
+import { readWrittenToday, recordWrittenToday, shouldSkipNonEssentialWrites, utcDay } from "./d1Budget.js";
 import { normalizeRawRows, groupByCode } from "./normalize.js";
 import { computeFeaturesForAll } from "./features.js";
 import { screenToPool, selectGeminiCandidates } from "./screening.js";
@@ -117,6 +118,23 @@ async function main() {
       })
     : null;
 
+  // D1の今日(UTC)の書き込み量(全ジョブの合計)。Cloudflare D1の無料枠(1日10万行)の残りが少ないときは、
+  // 必須ではない書き込み(銘柄マスタの同期・プール銘柄の株価)を省略し、AI評価・財務・エラーログに残りを回す。
+  // 台帳(d1_write_ledger)が読めない(migration 0005未適用など)ときは、省略せず従来どおり動く。
+  const ledgerDay = utcDay(startedAt);
+  const writtenToday = d1 ? await readWrittenToday(d1, ledgerDay) : null;
+  const skipNonEssentialD1 = shouldSkipNonEssentialWrites({
+    usedToday: writtenToday,
+    dailyTotal: config.D1_WRITE.dailyTotalBudget,
+    minRemaining: config.D1_WRITE.pipelineMinRemaining,
+  });
+  if (writtenToday !== null) {
+    console.log(`[pipeline] D1の今日(UTC ${ledgerDay})の書き込み: 実行前の合計 ${writtenToday}行 / 予算 ${config.D1_WRITE.dailyTotalBudget}行`);
+  }
+  if (skipNonEssentialD1) {
+    console.warn("[pipeline] D1の今日の書き込みの残りが少ないため、銘柄マスタの同期・プール銘柄の株価の保存を省略します（AI評価・財務は保存します）");
+  }
+
   // J-Quants APIの再試行(429/5xx/ネットワーク/タイムアウト)と失敗を溜めておき、あとでerror_logsへ記録する
   // (クライアントのコールバックは同期のため、ここでは配列に積むだけにする)。
   const jquantsEvents = [];
@@ -216,7 +234,7 @@ async function main() {
   // 銘柄マスタ(全銘柄)をD1のstocksへ同期する。新規・変更があった銘柄だけを書き込むため、日々の書き込みはほぼ0。
   // (以前はスクリーニングプールの銘柄だけがD1に入っていた。ユニバース全体のマスタを持つことで、
   //  バックテストや銘柄検索でプール外の銘柄も参照できる)
-  if (d1 && listedInfoByCode.size > 0) {
+  if (d1 && listedInfoByCode.size > 0 && !skipNonEssentialD1) {
     try {
       const masterResult = await syncStocksMaster({ d1, listedInfoByCode });
       console.log(`[pipeline] D1 銘柄マスタ同期: 全${masterResult.total}銘柄中、新規・変更${masterResult.written}件を書き込み`);
@@ -440,7 +458,7 @@ async function main() {
       { cutoffDate, predictionExecutedAt },
       { stocks: stocksForD1, pricesByCode: new Map(), financialsByCode }
     );
-    if (d1) {
+    if (d1 && !skipNonEssentialD1) {
       const fetchedAtIso = new Date().toISOString();
       const poolRowsAll = rawRows
         .map((r) => buildPriceRow(r, fetchedAtIso))
@@ -463,13 +481,9 @@ async function main() {
     }
   } catch (err) {
     console.warn(`[pipeline] D1: stocks / stock_prices / financials の事前保存に失敗（Gemini処理は続行）: ${err.message}`);
-    d1Summary = {
-      enabled: false,
-      stocks: 0,
-      stockPrices: 0,
-      financials: 0,
-      failures: [{ stage: "pre_gemini_save", error: err.message }],
-    };
+    // saveToD1が成功した後の処理(プール株価など)で失敗した場合は、saveToD1の結果(保存済みの件数)を残して失敗だけを追記する
+    d1Summary = d1Summary ?? { enabled: false, stocks: 0, stockPrices: 0, financials: 0, failures: [] };
+    d1Summary.failures.push({ stage: "pre_gemini_save", error: err.message });
   }
 
   // --- Stage 5: gemini — AI分析（通常候補+保有銘柄追加分。1リクエスト=1銘柄。429/503は設定回数までリトライ） ---
@@ -502,7 +516,7 @@ async function main() {
             aiEvaluationsSavedCount++;
           } catch (err) {
             console.warn(`[pipeline] D1: ai_evaluations即時保存に失敗 code=${outcome.code}: ${err.message}`);
-            aiEvaluationFailures.push({ code: outcome.code, error: err.message });
+            aiEvaluationFailures.push({ code: outcome.code, error: err.message, result: outcome.result });
           }
         } else {
           try {
@@ -530,6 +544,30 @@ async function main() {
     `[pipeline] gemini: ${analysisResults.length}/${combinedCandidates.length}件で分析成功（失敗/スキップ=${apiErrorCounts.gemini429OrError}件、うち保有銘柄追加分=${heldExtraCandidates.length}件）`
   );
   await writeArtifact("gemini-results.json", analysisResults);
+
+  // D1への保存に失敗したAI評価は、書き込み上限(無料枠)が原因でなければ、最後に1回だけ再試行する。
+  // 上限が原因のときは、再試行しても失敗するため行わない(評価の内容はKVの history:{cutoffDate}:{code} に保存される)。
+  if (d1 && aiEvaluationFailures.length > 0) {
+    if (d1.stats.quotaExceeded) {
+      console.warn(
+        `[pipeline] D1の書き込み上限に達したため、${aiEvaluationFailures.length}件のAI評価をD1に保存できませんでした` +
+          `（評価内容はKVのhistory:*と、artifactのgemini-results.jsonに残っています。UTCの0時=日本時間9時以降に再保存が必要です）`
+      );
+    } else {
+      const stillFailing = [];
+      for (const f of aiEvaluationFailures) {
+        try {
+          savedEvaluationIds.push(await saveEvaluationIncremental(d1, metaForEval, f.result, heldExtraCodes));
+          aiEvaluationsSavedCount++;
+        } catch (retryErr) {
+          stillFailing.push({ ...f, error: retryErr.message });
+        }
+      }
+      console.log(`[pipeline] D1へのAI評価の保存を再試行: ${aiEvaluationFailures.length - stillFailing.length}/${aiEvaluationFailures.length}件が成功`);
+      aiEvaluationFailures.length = 0;
+      aiEvaluationFailures.push(...stillFailing);
+    }
+  }
 
   // --- Stage 6: ranking — 上位ランキングの作成 ---
   // 公開ランキング(KVの"ranking")は、保有銘柄の追加によって挙動が変わらないよう、
@@ -574,6 +612,9 @@ async function main() {
     tradingDayCountInWindow: windowDates.length,
     marketFilter: marketFilterSummary,
     jquantsStats: { ...jquants.stats },
+    d1WrittenTodayBeforeRun: writtenToday,
+    d1SkippedNonEssentialWrites: skipNonEssentialD1,
+    d1QuotaExceeded: d1 ? d1.stats.quotaExceeded : false,
   };
 
   // --- Stage 7: Cloudflare KV へ保存（ranking / analysis / history / meta） ---
@@ -603,6 +644,13 @@ async function main() {
   }
 
   await flushJquantsEvents(); // J-Quantsの再試行・失敗(あれば)をerror_logsへ記録
+
+  // この実行のD1の書き込み行数を台帳に加算する(次のジョブが、今日(UTC)の残りから予算を決めるため)。
+  // saveToD1は別のクライアントを使うため、その分(stocks・financials)は1行あたり3行分として見積もって加える。
+  if (d1) {
+    const estimatedRows = d1.stats.rowsWritten + ((d1Summary.stocks ?? 0) + (d1Summary.financials ?? 0)) * 3;
+    await recordWrittenToday(d1, { day: ledgerDay, job: "pipeline", rows: estimatedRows });
+  }
 
   console.log(
     `[pipeline] 完了。処理時間: ${(processingTimeMs / 1000 / 60).toFixed(1)}分`

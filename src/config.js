@@ -222,6 +222,20 @@ export const config = {
     maxSplitRepairCodes: envNumber("PRICE_SYNC_MAX_SPLIT_REPAIR", 20),
   },
 
+  // --- D1の書き込み予算(Cloudflare D1 無料枠: アカウント全体で1日10万行。UTCの0時=日本時間9時にリセット) ---
+  // 上限ぎりぎりまで使うと、書き込み途中でエラー(AI評価・財務の保存失敗等)になるため、余裕を持たせる。
+  // パイプライン・株価蓄積(sync-prices.js)・手動実行は、終了時に自分の書き込み行数を台帳(d1_write_ledger)に加算し、
+  // 次のジョブは「今日(UTC)の残り」を見て予算を決める。有料プラン(Workers Paid)にしたら D1_DAILY_WRITE_TOTAL を上げる。
+  D1_WRITE: {
+    // 1日(UTC)に使ってよい書き込み行数の合計(無料枠の10万行に対して15%の余裕)
+    dailyTotalBudget: envNumber("D1_DAILY_WRITE_TOTAL", 85000),
+    // 株価蓄積の実行後も、その日の後続のパイプライン(手動実行を含む)のために残しておく行数
+    reserveForPipeline: envNumber("D1_RESERVE_FOR_PIPELINE", 10000),
+    // 今日の残りがこれを下回るとき、パイプラインは必須ではない書き込み(銘柄マスタ同期・プール銘柄の株価)を省略し、
+    // AI評価・財務・エラーログなどの必須の書き込みに残りを回す
+    pipelineMinRemaining: envNumber("D1_PIPELINE_MIN_REMAINING", 15000),
+  },
+
   // --- 最終ランキングに残す銘柄数 ---
   FINAL_RANKING_SIZE: 20,
 
