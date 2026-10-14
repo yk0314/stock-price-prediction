@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
-import { resolveCutoffDate, isOnOrBeforeCutoff } from "../src/cutoff.js";
+import { resolveCutoffDate, isOnOrBeforeCutoff, jstDateString } from "../src/cutoff.js";
 import { normalizeRawRow, normalizeRawRows, groupByCode } from "../src/normalize.js";
 import { computeFeatures, computeFeaturesForAll } from "../src/features.js";
 import { sma, ema, rsi, macd, bollingerBands, atr } from "../src/indicators.js";
@@ -42,10 +42,20 @@ await test("手動指定のcutoffDateがそのまま使われる", () => {
   assert.equal(cutoffDate, "2026-06-01");
   assert.equal(source, "manual");
 });
-await test("未指定時は自動計算(90日前)になる", () => {
-  const { cutoffDate, source } = resolveCutoffDate(undefined, new Date("2026-09-03T00:00:00Z"));
-  assert.equal(cutoffDate, "2026-06-05");
-  assert.equal(source, "auto");
+await test("未指定時は「実行日 - JQUANTS_DELAY_DAYS」(後方互換)。有料プランの既定は0で、遅延を仮定しない", () => {
+  const now = new Date("2026-09-03T00:00:00Z");
+  assert.equal(config.JQUANTS_DELAY_DAYS, 0); // 無料プランの12週間遅延(90日)の固定値は撤廃した
+  const byDefault = resolveCutoffDate(undefined, now);
+  assert.equal(byDefault.cutoffDate, "2026-09-03");
+  assert.equal(byDefault.source, "auto");
+  // 無料プランで運用する場合の互換: 設定値(JQUANTS_DELAY_DAYS)の分だけさかのぼる
+  const original = config.JQUANTS_DELAY_DAYS;
+  config.JQUANTS_DELAY_DAYS = 90;
+  try {
+    assert.equal(resolveCutoffDate(undefined, now).cutoffDate, "2026-06-05");
+  } finally {
+    config.JQUANTS_DELAY_DAYS = original;
+  }
 });
 await test("不正な形式はエラーになる", () => {
   assert.throws(() => resolveCutoffDate("not-a-date"));
@@ -555,7 +565,14 @@ await test("screenToPool: price/volumeSma20が無い(未計算の)特徴量は�
 });
 await test("selectGeminiCandidates: config.GEMINI.candidateCount件に絞る", () => {
   const pool = Array.from({ length: 50 }, (_, i) => ({ code: `C${i}`, priceChange5d: 10 - i }));
-  const selected = selectGeminiCandidates(pool);
+  const originalCandidateCount = config.GEMINI.candidateCount;
+  config.GEMINI.candidateCount = 10; // テスト用に件数を固定する(既定は150)
+  let selected;
+  try {
+    selected = selectGeminiCandidates(pool);
+  } finally {
+    config.GEMINI.candidateCount = originalCandidateCount;
+  }
   assert.equal(selected.length, 10); // config.GEMINI.candidateCount のデフォルト値
 });
 await test("screenToPool: 4,400銘柄規模のデータでもエラーなく高速に動作する（全銘柄化の検証）", () => {
@@ -1074,9 +1091,12 @@ await test("batchInsertOrReplace: 呼び出し側指定のchunkSizeがD1上限�
 });
 
 console.log("[test] marketDataService.js");
-await test("discoverSubscriptionBoundary: 今日が直接取得できれば遅延なしと判定する", async () => {
+await test("discoverSubscriptionBoundary: 今日(JST)の全銘柄分のデータが取得できれば遅延なしと判定する", async () => {
   const originalFetch = global.fetch;
-  global.fetch = async () => new Response(JSON.stringify({ data: [] }), { status: 200 });
+  const originalMinRows = config.LATEST_DATE.minRowsForCompleteDay;
+  config.LATEST_DATE.minRowsForCompleteDay = 1; // テストなので、1件あれば「全銘柄分が揃っている」とみなす
+  global.fetch = async () =>
+    new Response(JSON.stringify({ data: [{ Date: "2026-01-01", Code: "13010" }] }), { status: 200 });
   try {
     const { discoverSubscriptionBoundary, resetSubscriptionBoundaryCache } = await import(
       "../src/marketDataService.js"
@@ -1084,9 +1104,36 @@ await test("discoverSubscriptionBoundary: 今日が直接取得できれば遅�
     resetSubscriptionBoundaryCache();
     const boundary = await discoverSubscriptionBoundary(new JQuantsClient("dummy"));
     assert.equal(boundary.discoveredVia, "direct-success");
-    assert.equal(boundary.to, new Date().toISOString().slice(0, 10));
+    assert.equal(boundary.to, jstDateString());
   } finally {
     global.fetch = originalFetch;
+    config.LATEST_DATE.minRowsForCompleteDay = originalMinRows;
+  }
+});
+await test("discoverSubscriptionBoundary: 今日のデータがまだ無い(0件)ときは、データがある最新の取引日を使う(今日を最新日にしない)", async () => {
+  const originalFetch = global.fetch;
+  const originalMinRows = config.LATEST_DATE.minRowsForCompleteDay;
+  config.LATEST_DATE.minRowsForCompleteDay = 1;
+  const todayCompact = jstDateString().replaceAll("-", "");
+  global.fetch = async (url) => {
+    const isToday = String(url).includes(`date=${todayCompact}`);
+    return new Response(JSON.stringify({ data: isToday ? [] : [{ Date: "2026-01-01", Code: "13010" }] }), {
+      status: 200,
+    });
+  };
+  try {
+    const { discoverSubscriptionBoundary, resetSubscriptionBoundaryCache } = await import(
+      "../src/marketDataService.js"
+    );
+    resetSubscriptionBoundaryCache();
+    const boundary = await discoverSubscriptionBoundary(new JQuantsClient("dummy", { intervalMs: 0 }));
+    assert.equal(boundary.discoveredVia, "latest-with-data");
+    assert.ok(boundary.to < jstDateString(), `今日(${jstDateString()})はデータが無いので、それより前の日付になるはず: ${boundary.to}`);
+    const weekday = new Date(boundary.to + "T00:00:00Z").getUTCDay();
+    assert.ok(weekday !== 0 && weekday !== 6, "土日は取引日ではない");
+  } finally {
+    global.fetch = originalFetch;
+    config.LATEST_DATE.minRowsForCompleteDay = originalMinRows;
   }
 });
 await test("discoverSubscriptionBoundary: 400エラーメッセージから提供期間を検出する（Freeプラン等）", async () => {
@@ -1114,6 +1161,10 @@ await test("discoverSubscriptionBoundary: 400エラーメッセージから提�
 });
 await test("discoverSubscriptionBoundary: 解析できないエラーはconfigの値にフォールバックする", async () => {
   const originalFetch = global.fetch;
+  const originalDelay = config.JQUANTS_DELAY_DAYS;
+  const originalRetry = { ...config.JQUANTS_RETRY };
+  config.JQUANTS_DELAY_DAYS = 90; // 検出失敗時の「最後の保険」(通常は0)を明示的に設定する
+  config.JQUANTS_RETRY.maxRetriesOnTransient = 0; // テストなので、5xxの再試行(待機)はしない
   global.fetch = async () => new Response("unexpected error", { status: 500 });
   try {
     const { discoverSubscriptionBoundary, resetSubscriptionBoundaryCache } = await import(
@@ -1122,17 +1173,21 @@ await test("discoverSubscriptionBoundary: 解析できないエラーはconfig�
     resetSubscriptionBoundaryCache();
     const boundary = await discoverSubscriptionBoundary(new JQuantsClient("dummy"));
     assert.equal(boundary.discoveredVia, "fallback-config");
-    assert.ok(boundary.to < new Date().toISOString().slice(0, 10));
+    assert.ok(boundary.to < jstDateString());
   } finally {
     global.fetch = originalFetch;
+    config.JQUANTS_DELAY_DAYS = originalDelay;
+    Object.assign(config.JQUANTS_RETRY, originalRetry);
   }
 });
 await test("discoverSubscriptionBoundary: 同一実行内ではキャッシュされ再度probeしない", async () => {
   const originalFetch = global.fetch;
+  const originalMinRows = config.LATEST_DATE.minRowsForCompleteDay;
+  config.LATEST_DATE.minRowsForCompleteDay = 1;
   let callCount = 0;
   global.fetch = async () => {
     callCount++;
-    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+    return new Response(JSON.stringify({ data: [{ Date: "2026-01-01", Code: "13010" }] }), { status: 200 });
   };
   try {
     const { discoverSubscriptionBoundary, resetSubscriptionBoundaryCache } = await import(
@@ -1144,6 +1199,7 @@ await test("discoverSubscriptionBoundary: 同一実行内ではキャッシュ�
     assert.equal(callCount, 1);
   } finally {
     global.fetch = originalFetch;
+    config.LATEST_DATE.minRowsForCompleteDay = originalMinRows;
   }
 });
 await test("resolveEffectiveCutoffDate: 手動指定があればそれを優先する", async () => {
@@ -1154,7 +1210,10 @@ await test("resolveEffectiveCutoffDate: 手動指定があればそれを優先�
 });
 await test("resolveEffectiveCutoffDate: 未指定なら自動検出した最新日を使う", async () => {
   const originalFetch = global.fetch;
-  global.fetch = async () => new Response(JSON.stringify({ data: [] }), { status: 200 });
+  const originalMinRows = config.LATEST_DATE.minRowsForCompleteDay;
+  config.LATEST_DATE.minRowsForCompleteDay = 1;
+  global.fetch = async () =>
+    new Response(JSON.stringify({ data: [{ Date: "2026-01-01", Code: "13010" }] }), { status: 200 });
   try {
     const { resolveEffectiveCutoffDate, resetSubscriptionBoundaryCache } = await import(
       "../src/marketDataService.js"
@@ -1162,9 +1221,10 @@ await test("resolveEffectiveCutoffDate: 未指定なら自動検出した最新�
     resetSubscriptionBoundaryCache();
     const result = await resolveEffectiveCutoffDate(new JQuantsClient("dummy"), undefined);
     assert.equal(result.source, "auto-detected");
-    assert.equal(result.cutoffDate, new Date().toISOString().slice(0, 10));
+    assert.equal(result.cutoffDate, jstDateString());
   } finally {
     global.fetch = originalFetch;
+    config.LATEST_DATE.minRowsForCompleteDay = originalMinRows;
   }
 });
 
@@ -1217,6 +1277,25 @@ await test("buildListedInfoByCode: 空・未定義配列は空のMapを返す", 
   const { buildListedInfoByCode } = await import("../src/listedInfo.js");
   assert.equal(buildListedInfoByCode([]).size, 0);
   assert.equal(buildListedInfoByCode(undefined).size, 0);
+});
+
+await test("normalizeListedInfoRow: 英字を含む新しい証券コード(例: 135A0)も、株価データ(normalizeRawRow)と同じ形式になる", async () => {
+  const { normalizeListedInfoRow } = await import("../src/listedInfo.js");
+  const master = normalizeListedInfoRow({ Code: "135A0", CoName: "テスト銘柄", MktNm: "グロース" });
+  const price = normalizeRawRow({ Code: "135A0", Date: "20261005", AdjC: 100 });
+  assert.equal(master.code, "135A");
+  assert.equal(master.code, price.code); // 株価データと銘柄マスタを同じコードで結び付けられる
+});
+await test("buildListedInfoByCode: 英字コードの銘柄も株価データのコードで引ける(全銘柄モードの市場区分フィルタで漏れない)", async () => {
+  const { buildListedInfoByCode } = await import("../src/listedInfo.js");
+  const map = buildListedInfoByCode([
+    { Code: "135A0", CoName: "テスト銘柄", MktNm: "グロース" },
+    { Code: "72030", CoName: "トヨタ自動車", MktNm: "プライム" },
+    { Code: "72035", CoName: "5桁目が0以外はそのまま", MktNm: "プライム" },
+  ]);
+  assert.equal(map.get("135A").name, "テスト銘柄");
+  assert.equal(map.get("7203").market, "プライム");
+  assert.ok(map.has("72035"));
 });
 
 console.log("[test] worker/src/index.js (/api/ranking)");
@@ -1307,7 +1386,7 @@ await test("/api/ranking: D1のai_evaluationsからscore降順のランキング
   assert.deepEqual(body[0].positiveFactors, ["good news"]); // JSON文字列がパースされて配列で返る
 });
 
-await test("/api/ranking: SQLが銘柄ごとに最新(MAX id)のみをscore降順で選ぶ構造になっている", async () => {
+await test("/api/ranking: SQLが「今日のランキング日の最新の実行」のpipeline評価だけをscore降順で選ぶ構造になっている", async () => {
   const worker = (await import("../worker/src/index.js")).default;
   let capturedSql = null;
   const fakeDb = {
@@ -1322,13 +1401,15 @@ await test("/api/ranking: SQLが銘柄ごとに最新(MAX id)のみをscore降�
   };
   await worker.fetch(new Request("https://example.com/api/ranking"), { DB: fakeDb });
   assert.ok(capturedSql.includes("FROM ai_evaluations"));
-  assert.ok(capturedSql.includes("MAX(id)"));
-  assert.ok(capturedSql.includes("GROUP BY code"));
+  assert.ok(capturedSql.includes("MAX(generated_at)")); // 今日の最新の1回の実行(generated_at)だけに絞る
+  assert.ok(capturedSql.includes("date(generated_at, '-8 hours')")); // 日本時間17:00で「今日」が切り替わる
+  assert.ok(capturedSql.includes("ae.source = 'pipeline'"));
+  assert.ok(!capturedSql.includes("MAX(id)")); // 前日以前・前回完走分へのフォールバックはしない
   assert.ok(capturedSql.includes("ORDER BY ae.score DESC"));
   assert.ok(capturedSql.includes("LEFT JOIN stocks"));
 });
 
-await test("/api/ranking: limitパラメータがD1へのbind引数に反映される（上限100件でキャップ）", async () => {
+await test("/api/ranking: ランキング日とlimitがD1へのbind引数に反映される（上限100件でキャップ）", async () => {
   const worker = (await import("../worker/src/index.js")).default;
   let capturedArgs = null;
   const fakeDb = {
@@ -1343,14 +1424,17 @@ await test("/api/ranking: limitパラメータがD1へのbind引数に反映さ�
       return statement;
     },
   };
+  // ランキング日 = 日本時間17:00で切り替わる日付(UTCに -8時間を加えた日付)
+  const rankingDay = new Date(Date.now() + (9 - 17) * 60 * 60 * 1000).toISOString().slice(0, 10);
+
   await worker.fetch(new Request("https://example.com/api/ranking?limit=5"), { DB: fakeDb });
-  assert.deepEqual(capturedArgs, [5]);
+  assert.deepEqual(capturedArgs, [rankingDay, 5]);
 
   await worker.fetch(new Request("https://example.com/api/ranking?limit=999"), { DB: fakeDb });
-  assert.deepEqual(capturedArgs, [100]); // MAX_RANKING_LIMIT(100)でキャップされる
+  assert.deepEqual(capturedArgs, [rankingDay, 100]); // MAX_RANKING_LIMIT(100)でキャップされる
 
   await worker.fetch(new Request("https://example.com/api/ranking"), { DB: fakeDb });
-  assert.deepEqual(capturedArgs, [20]); // limit未指定時のデフォルト(DEFAULT_RANKING_LIMIT)
+  assert.deepEqual(capturedArgs, [rankingDay, 20]); // limit未指定時のデフォルト(DEFAULT_RANKING_LIMIT)
 });
 
 await test("/api/ranking: Gemini分析が存在しない銘柄(ai_evaluationsに行が無い)は自然に除外される", async () => {
@@ -1576,6 +1660,11 @@ function makeFakeTradesD1({ trades = [], latestEvaluationIdByCode = {}, latestEv
           return null;
         },
         async all() {
+          if (sql.includes("FROM ai_evaluations") && sql.includes("WHERE ae.code = ?")) {
+            // 銘柄ごとのAI評価(新しい順)。最新と、その1つ前の評価を取得するクエリ
+            const row = latestEvaluationRowByCode[statement.args[0]];
+            return { results: row ? [row] : [] };
+          }
           if (sql.includes("FROM trades")) {
             const codeFilter = sql.includes("WHERE t.code = ?") ? statement.args[0] : null;
             const rows = state.trades
@@ -1897,7 +1986,7 @@ function geminiJsonResponse(bodyObj, status = 200, headers = {}) {
   return new Response(status === 200 ? JSON.stringify(envelope) : JSON.stringify({ error: bodyObj }), { status, headers });
 }
 const validGeminiResult = (code) => ({
-  code, score: 80, rating: "BUY", expectedReturn: 3.5, expectedHoldingDays: 5, risk: "MEDIUM",
+  code, tradeable: true, score: 80, rating: "BUY", expectedReturn: 3.5, expectedHoldingDays: 5, risk: "MEDIUM",
   upsideProbability: 60, downsideRisk: 30, stance: "positive", reasoning: "r", summary: "s",
   positiveFactors: [], negativeFactors: [], confidence: 70,
 });
@@ -1989,7 +2078,7 @@ await test("503もリトライ対象、429/503以外は即座に失敗扱い(リ
   }
 });
 
-await test("JSON不正・銘柄コード不一致・score範囲外・必須項目欠落はいずれも失敗扱い", async () => {
+await test("JSON不正・銘柄コード不一致・score範囲外・score欠落はいずれも失敗扱い", async () => {
   const originalFetch = global.fetch;
   const { analyzeWithGemini } = await import("../src/gemini.js");
 
@@ -2017,10 +2106,9 @@ await test("JSON不正・銘柄コード不一致・score範囲外・必須項�
     global.fetch = originalFetch;
   }
 
-  const noSummary = { ...validGeminiResult("3004") };
-  delete noSummary.summary;
-  delete noSummary.reasoning;
-  global.fetch = async () => geminiJsonResponse(noSummary);
+  const missingScore = { ...validGeminiResult("3004") };
+  delete missingScore.score;
+  global.fetch = async () => geminiJsonResponse(missingScore);
   try {
     assert.equal((await analyzeWithGemini("key", makeGeminiFeature("3004"))).success, false);
   } finally {

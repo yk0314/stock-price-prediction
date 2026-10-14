@@ -1,21 +1,25 @@
 import { config } from "./config.js";
 import { JQuantsApiError } from "./jquants.js";
+import { jstDateString, resolveLatestAvailableDate } from "./cutoff.js";
 import { normalizeRawRows, groupByCode } from "./normalize.js";
 import { buildAvailableFinancialsByCode } from "./financials.js";
 
 // 【設計方針】
-// このモジュールは、J-Quantsの「Freeプランは約90日遅延する」という制約を
+// このモジュールは、J-Quantsの契約プラン(Freeの約12週間遅延など)による「何日まで見えるか」を
 // アプリケーション全体のロジックに埋め込まないための抽象化レイヤーである。
-// 呼び出し側(pipeline.js等の上位層)は getLatestAvailableDate() / getHistoricalPrices() /
-// getFinancialData() だけを使い、「今どのプランで、何日まで見えるか」を意識しない。
+// 呼び出し側は getLatestAvailableDate() / getHistoricalPrices() / getFinancialData() だけを使い、
+// 「今どのプランで、何日まで見えるか」を意識しない。
 //
-// Freeプランでは、利用可能な最新日を超えた範囲を要求すると
-// J-Quants側が400エラーでメッセージに実際の提供期間
-// （例: "Your subscription covers the following dates: 2024-06-20 ~ 2026-06-20"）
-// を返してくる。このメッセージを解析することで、
-// 「今日から何日遅延するか」をハードコードせず、実際の契約プランから動的に検出する。
-// 有料プランに移行してこの制約が無くなった場合も、コードを変更する必要はない
-// （probeで「今日」を直接取得でき、そのまま境界として扱われる）。
+// 利用可能な最新日は、次の順に動的に判定する(固定の遅延日数は使わない):
+//   1. 今日(日本時間)の株価が全銘柄分そろっていれば、今日(遅延なし。有料プラン)
+//   2. 今日の株価がまだ無い(休日・日本時間16:30の更新前・更新途中)ときは、実際にデータがある最新の取引日
+//      (cutoff.js の resolveLatestAvailableDate。取引日の判定は平日。pipeline.jsは取引カレンダーも使う)
+//   3. Freeプランで契約期間外を指定した400エラーは、メッセージ
+//      (例: "Your subscription covers the following dates: 2024-06-20 ~ 2026-06-20")から上限日を取り出す
+//   4. どれでも判定できないときだけ、config.JQUANTS_DELAY_DAYS を「最後の保険」として使う
+//
+// 【過去の不具合】以前は「今日のAPI呼び出しが成功(エラーにならない)」だけで「今日が最新日」と判定していたため、
+// 休日・更新前でdata:[]が返っても今日をデータ基準日にしてしまった(実際にはデータが無い日)。
 
 const SUBSCRIPTION_RANGE_REGEX = /covers the following dates:\s*([\d-]+)\s*~\s*([\d-]+)/i;
 
@@ -40,12 +44,11 @@ export function resetSubscriptionBoundaryCache() {
 }
 
 /**
- * 現在の契約プランで実際に取得可能な日付範囲を動的に検出する。
- * - 「今日」を直接取得できればそれが上限（遅延なし = 有料プラン等）
- * - 400エラーで提供期間が返れば、そのメッセージから上限日を抽出する（Freeプラン等）
- * - どちらの方法でも判定できない場合のみ、config.JQUANTS_DELAY_DAYSを
- *   「最後の保険」としてのフォールバックに使う（プラン固有の値をアプリ仕様として
- *   固定するものではなく、あくまで検出失敗時の安全側デフォルト）。
+ * 現在の契約プランで実際に取得可能な日付範囲(最新日)を動的に検出する。
+ * - 今日(日本時間)の株価が全銘柄分そろっていれば、それが上限(discoveredVia: "direct-success")
+ * - 今日のデータがまだ無ければ、データがある最新の取引日(discoveredVia: "latest-with-data")
+ * - 400エラーで提供期間が返れば、そのメッセージから上限日を抽出する（Freeプラン等。"error-message"）
+ * - どの方法でも判定できない場合のみ、config.JQUANTS_DELAY_DAYSを「最後の保険」に使う("fallback-config")
  *
  * @param {import("./jquants.js").JQuantsClient} client
  * @returns {Promise<{to: string, from?: string, discoveredVia: string}>}
@@ -53,10 +56,16 @@ export function resetSubscriptionBoundaryCache() {
 export async function discoverSubscriptionBoundary(client, { forceRefresh = false } = {}) {
   if (cachedBoundary && !forceRefresh) return cachedBoundary;
 
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = jstDateString();
   try {
-    await client.fetchDailyQuotesForDate(todayStr.replaceAll("-", ""));
-    cachedBoundary = { to: todayStr, discoveredVia: "direct-success" };
+    const todayRows = await client.fetchDailyQuotesForDate(todayStr.replaceAll("-", ""));
+    if (todayRows.length >= config.LATEST_DATE.minRowsForCompleteDay) {
+      cachedBoundary = { to: todayStr, discoveredVia: "direct-success" };
+      return cachedBoundary;
+    }
+    // 今日の株価がまだ無い(休日・更新前・更新途中)。実際にデータがある最新の取引日を探す
+    const latest = await resolveLatestAvailableDate(client, {});
+    cachedBoundary = { to: latest.cutoffDate, discoveredVia: "latest-with-data" };
     return cachedBoundary;
   } catch (err) {
     if (err instanceof JQuantsApiError && err.status === 400) {

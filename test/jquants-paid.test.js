@@ -14,6 +14,8 @@ import {
   weekdayOnOrBefore,
 } from "../src/tradingCalendar.js";
 import { filterByListedMarket } from "../src/universe.js";
+import { buildListedInfoByCode } from "../src/listedInfo.js";
+import { groupByCode, normalizeRawRows } from "../src/normalize.js";
 import { config } from "../src/config.js";
 
 // ---- テスト用の部品 ----
@@ -405,6 +407,26 @@ test("Universe: ALL指定・銘柄マスタ未取得のときは絞り込まな�
   const noMaster = filterByListedMarket(grouped, new Map(), ["プライム"]);
   assert.equal(noMaster.grouped.size, 2);
   assert.equal(noMaster.summary.skipped, "master-unavailable");
+});
+
+test("Universe=all: 英字を含む新しい証券コード(135A等)の銘柄も、市場区分フィルタで漏れずに残る(過去の不具合の再発防止)", () => {
+  // 株価データ(5桁コード)と銘柄マスタ(5桁コード)は、どちらも同じルールで4文字のコードにそろえる
+  const prices = normalizeRawRows([
+    { Date: "2026-10-05", Code: "72030", AdjC: 100 },
+    { Date: "2026-10-05", Code: "135A0", AdjC: 200 }, // 2024年以降の新しい証券コード(英字を含む)
+    { Date: "2026-10-05", Code: "13060", AdjC: 300 }, // ETF
+  ]);
+  const grouped = groupByCode(prices);
+  const master = buildListedInfoByCode([
+    { Code: "72030", CoName: "トヨタ自動車", MktNm: "プライム" },
+    { Code: "135A0", CoName: "新規上場の銘柄", MktNm: "グロース" },
+    { Code: "13060", CoName: "ETF", MktNm: "その他" },
+  ]);
+  const { grouped: kept, summary } = filterByListedMarket(grouped, master, ["プライム", "スタンダード", "グロース"]);
+  assert.deepEqual([...kept.keys()].sort(), ["135A", "7203"]);
+  assert.equal(master.get("135A").name, "新規上場の銘柄"); // 銘柄名も株価データのコードで引ける
+  assert.equal(summary.removedByMarket["その他"], 1);
+  assert.equal(summary.removedByMarket["(銘柄マスタに無い)"], undefined);
 });
 
 // ---- 設定(環境変数) ----

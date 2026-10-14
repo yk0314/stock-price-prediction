@@ -5,6 +5,7 @@
 // これらを最優先の候補キーとして採用している。それ以外の候補キーは、
 // 万一将来レスポンス形式が変わった場合のフォールバックとして残してある
 // （financials.jsで実際にV1形式のフォールバックが使われた前例に倣った設計）。
+import { toShortCode } from "./normalize.js";
 
 function pick(row, keys) {
   for (const key of keys) {
@@ -17,14 +18,16 @@ function pick(row, keys) {
 }
 
 /**
- * 5桁コード(末尾0)を4桁化する。normalize.jsの正規化ルールと合わせるため、
- * stock_prices/financials等、他のテーブルのcodeと同じ形式にする。
+ * 銘柄コードを、stock_prices/financials等、他のテーブルのcodeと同じ形式にする。
+ * 株価データ(normalize.js)と同じ toShortCode() を使い、変換ルールを1か所に統一している。
+ *
+ * 【過去の不具合】以前は /^\d{4}0$/ (数字のみ)で4桁化していたため、2024年以降の新しい証券コード
+ * (英字を含む。例: "135A0" → 株価側は "135A")が銘柄マスタ側だけ "135A0" のままになり、
+ * 株価データと銘柄マスタを結び付けられなかった(銘柄名が出ない・市場区分フィルタで全銘柄モードから漏れる)。
  */
 function normalizeCode(rawCode) {
   if (rawCode === null || rawCode === undefined) return null;
-  const code = String(rawCode);
-  if (/^\d{4}0$/.test(code)) return code.slice(0, 4);
-  return code;
+  return toShortCode(rawCode);
 }
 
 /**
