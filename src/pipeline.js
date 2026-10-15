@@ -496,6 +496,9 @@ async function main() {
   let aiEvaluationsSavedCount = 0;
   const savedEvaluationIds = [];
   const aiEvaluationFailures = [];
+  // Geminiの結果の内訳(除外=「買う価値なし」はエラーではない)
+  let geminiExcludedCount = 0;
+  let geminiFailedCount = 0;
 
   const analysisResults = await analyzeCandidates(
     process.env.GEMINI_API_KEY,
@@ -503,6 +506,8 @@ async function main() {
     { cutoffDate, predictionExecutedAt },
     {
       onCandidateComplete: async (outcome) => {
+        if (outcome.excluded) geminiExcludedCount++;
+        else if (!outcome.success) geminiFailedCount++;
         if (!d1) return; // D1未接続時は即時保存もエラーログ記録もできないため何もしない
         if (outcome.excluded) {
           // 新規候補が「買う価値なし」と判定されただけであり、エラーではない。
@@ -539,9 +544,9 @@ async function main() {
       },
     }
   );
-  apiErrorCounts.gemini429OrError = combinedCandidates.length - analysisResults.length;
+  apiErrorCounts.gemini429OrError = geminiFailedCount; // 本物の失敗のみ(除外は含めない)
   console.log(
-    `[pipeline] gemini: ${analysisResults.length}/${combinedCandidates.length}件で分析成功（失敗/スキップ=${apiErrorCounts.gemini429OrError}件、うち保有銘柄追加分=${heldExtraCandidates.length}件）`
+    `[pipeline] gemini: 送信${combinedCandidates.length}件(うち保有銘柄の再評価対象${heldExtraCandidates.length}件) → 成功${analysisResults.length}件 / 除外(買う価値なし)${geminiExcludedCount}件 / 失敗${geminiFailedCount}件 / 未処理${combinedCandidates.length - analysisResults.length - geminiExcludedCount - geminiFailedCount}件`
   );
   await writeArtifact("gemini-results.json", analysisResults);
 
