@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { D1Client, D1QuotaError, isQuotaExceededMessage } from "../src/d1.js";
+import { D1Client, D1QuotaError, isQuotaExceededMessage, rethrowIfD1QuotaError } from "../src/d1.js";
+import { syncIndexPrices, syncStocksMaster } from "../src/d1Sync.js";
 import { computeSyncBudget, readWrittenToday, recordWrittenToday, shouldSkipNonEssentialWrites, utcDay } from "../src/d1Budget.js";
 
 const QUOTA_BODY = '{"messages":[],"result":[],"success":false,"errors":[{"code":7500,"message":"Your account has exceeded D1\'s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue."}]}';
@@ -128,4 +129,39 @@ test("パイプライン・sync-prices が台帳と書き込み上限の扱い�
   assert.match(sync, /computeSyncBudget/);
   assert.match(sync, /recordWrittenToday\(d1, \{ day: ledgerDay, job: "sync-prices"/);
   assert.match(sync, /D1QuotaError/);
+});
+
+test("rethrowIfD1QuotaError: 書き込み上限のエラーだけを投げ直し、通常のエラーや空の値では何もしない", () => {
+  const quota = new D1QuotaError("上限");
+  assert.throws(() => rethrowIfD1QuotaError(quota), (e) => e === quota);
+  // 別のコピーのクラスでも、名前で判定できる
+  const byName = Object.assign(new Error("上限"), { name: "D1QuotaError" });
+  assert.throws(() => rethrowIfD1QuotaError(byName), (e) => e === byName);
+  assert.doesNotThrow(() => rethrowIfD1QuotaError(new Error("D1クエリ失敗 (400): no such table: foo")));
+  assert.doesNotThrow(() => rethrowIfD1QuotaError(Object.assign(new Error("403"), { status: 403 })));
+  assert.doesNotThrow(() => rethrowIfD1QuotaError(null));
+  assert.doesNotThrow(() => rethrowIfD1QuotaError(undefined));
+});
+
+test("銘柄マスタ・TOPIXの同期は、D1QuotaErrorを握りつぶさず呼び出し元へ伝える(続行するcatchが再送出できる)", async () => {
+  const d1 = {
+    stats: { rowsWritten: 0 },
+    query: async () => [],
+    bulkUpsertJson: async () => {
+      throw new D1QuotaError("上限");
+    },
+  };
+  const master = new Map([["7203", { code: "7203", name: "トヨタ自動車", market: "プライム" }]]);
+  await assert.rejects(() => syncStocksMaster({ d1, listedInfoByCode: master }), D1QuotaError);
+  const client = { fetchTopixRange: async () => [{ Date: "2026-10-01", C: 1 }] };
+  await assert.rejects(
+    () => syncIndexPrices({ client, d1, indexCode: "TOPIX", fromDate: "2024-10-03", toDate: "2026-10-01", writeBudget: 100 }),
+    D1QuotaError
+  );
+});
+
+test("sync-prices: 銘柄マスタとTOPIXの「続行」するcatchはD1QuotaErrorを再送出し、TOPIXにも書き込み予算を渡している(配線の確認)", () => {
+  const sync = readFileSync(new URL("../scripts/sync-prices.js", import.meta.url), "utf8");
+  assert.equal((sync.match(/rethrowIfD1QuotaError\(err\);/g) ?? []).length, 2);
+  assert.match(sync, /syncIndexPrices\(\{[^}]*writeBudget:/);
 });

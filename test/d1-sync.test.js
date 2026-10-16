@@ -349,6 +349,53 @@ sqliteTest("TOPIX: 初回は期間全体、2回目以降は保存済みの最終
   assert.equal(count(sqlite, "SELECT close FROM index_prices WHERE date='2026-10-01'"), 4051);
 });
 
+sqliteTest("TOPIX: 書き込み予算が足りないときは、古い日付から予算内の行だけ書き、残りは次回に回す(再開できる)", async () => {
+  const sqlite = newDb();
+  const d1 = new FakeD1(sqlite); // 1行の書き込みを2行分(本体 + 主キーの索引)と数える
+  const raw = (d, c) => ({ Date: d, O: c, H: c + 1, L: c - 1, C: c });
+  // 新しい日付から並んで返ってきても、古い順に書く(新しい順に書くと、飛ばした古い日付が次回以降も補われない)
+  const fiveDays = [raw("2026-09-28", 4040), raw("2026-09-27", 4030), raw("2026-09-26", 4020), raw("2026-09-25", 4010), raw("2026-09-24", 4000)];
+  const c1 = fakeClient({}, { __topix: fiveDays });
+  const first = await syncIndexPrices({ client: c1, d1, indexCode: "TOPIX", fromDate: "2024-10-03", toDate: "2026-09-28", writeBudget: 6 });
+  assert.equal(first.rows, 3); // 予算6行分 ÷ 2 = 3行
+  assert.equal(first.remaining, 2);
+  assert.equal(first.stoppedBy, "write-budget");
+  assert.equal(d1.stats.rowsWritten, 6);
+  assert.deepEqual(
+    sqlite.prepare("SELECT date FROM index_prices ORDER BY date").all().map((r) => r.date),
+    ["2026-09-24", "2026-09-25", "2026-09-26"]
+  );
+
+  // 次回: 保存済みの最終日(09-26)の5日前から再取得して、残りも書き込む
+  const c2 = fakeClient({}, { __topix: fiveDays });
+  const second = await syncIndexPrices({ client: c2, d1, indexCode: "TOPIX", fromDate: "2024-10-03", toDate: "2026-09-28", writeBudget: 100 });
+  assert.deepEqual(c2.calls.topix[0], ["20260921", "20260928"]);
+  assert.equal(second.stoppedBy, null);
+  assert.equal(second.remaining, 0);
+  assert.equal(count(sqlite, "SELECT COUNT(*) FROM index_prices"), 5);
+  assert.equal(count(sqlite, "SELECT MAX(date) = '2026-09-28' FROM index_prices"), 1);
+});
+
+sqliteTest("TOPIX: 予算が0なら何も書かず次回に回す。ちょうど足りる予算なら全行を書く。予算を渡さなければ従来どおり制限なし", async () => {
+  const raw = (d, c) => ({ Date: d, O: c, H: c + 1, L: c - 1, C: c });
+  const rows = [raw("2026-09-25", 4010), raw("2026-09-24", 4000)];
+
+  const sqliteA = newDb();
+  const d1A = new FakeD1(sqliteA);
+  const zero = await syncIndexPrices({ client: fakeClient({}, { __topix: rows }), d1: d1A, indexCode: "TOPIX", fromDate: "2024-10-03", toDate: "2026-09-25", writeBudget: 0 });
+  assert.deepEqual([zero.rows, zero.remaining, zero.stoppedBy], [0, 2, "write-budget"]);
+  assert.equal(d1A.stats.rowsWritten, 0);
+  assert.equal(count(sqliteA, "SELECT COUNT(*) FROM index_prices"), 0);
+
+  const sqliteB = newDb();
+  const exact = await syncIndexPrices({ client: fakeClient({}, { __topix: rows }), d1: new FakeD1(sqliteB), indexCode: "TOPIX", fromDate: "2024-10-03", toDate: "2026-09-25", writeBudget: 4 });
+  assert.deepEqual([exact.rows, exact.remaining, exact.stoppedBy], [2, 0, null]);
+
+  const sqliteC = newDb();
+  const unlimited = await syncIndexPrices({ client: fakeClient({}, { __topix: rows }), d1: new FakeD1(sqliteC), indexCode: "TOPIX", fromDate: "2024-10-03", toDate: "2026-09-25" });
+  assert.deepEqual([unlimited.rows, unlimited.remaining, unlimited.stoppedBy], [2, 0, null]);
+});
+
 sqliteTest("銘柄マスタ(全銘柄)の同期: 初回は全件、変更が無ければ0件、名称変更だけ1件", async () => {
   const sqlite = newDb();
   const d1 = new FakeD1(sqlite);

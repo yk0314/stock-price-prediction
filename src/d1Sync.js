@@ -24,6 +24,8 @@ export const STOCK_COLUMNS = ["code", "name", "market", "updated_at"];
 export const WRITES_PER_PRICE_ROW = 2;
 // 1日あたりの株価行数の目安(実測: 約4,400)。予算の事前チェックに使う
 export const TYPICAL_ROWS_PER_DAY = 4500;
+// 指数(index_prices)も主キー(index_code, date)のみなので、1行あたりの見積もりは株価と同じ(本体 + 主キーの索引)
+export const WRITES_PER_INDEX_ROW = 2;
 
 function numberOrNull(v) {
   if (v === undefined || v === null || v === "") return null;
@@ -278,16 +280,42 @@ export async function upsertIndexRows(d1, rows) {
 /**
  * TOPIX等の指数を、保存済みの最終日の少し前(再取得で補正するため5日)から最新まで取得してupsertする。
  * 初回は fromDate から。
+ *
+ * writeBudget(この呼び出しで使ってよいD1の書き込み行数。省略すると制限なし)を超えるときは、
+ * 古い日付から予算内の行だけを書き込み、残りは次回に回す(stoppedBy="write-budget")。
+ * 新しい日付から書くと、保存済みの最終日が先に進み、飛ばした古い日付が次回以降も補われなくなるため、必ず古い順に書く。
  */
-export async function syncIndexPrices({ client, d1, indexCode, fromDate, toDate, nowIso = () => new Date().toISOString() }) {
+export async function syncIndexPrices({
+  client,
+  d1,
+  indexCode,
+  fromDate,
+  toDate,
+  writeBudget = Infinity,
+  nowIso = () => new Date().toISOString(),
+}) {
   const last = await d1.query("SELECT MAX(date) AS last_date FROM index_prices WHERE index_code = ?", [indexCode]);
   const lastDate = last?.[0]?.last_date ?? null;
   const from = lastDate ? addDays(lastDate, -5) : fromDate;
   const effectiveFrom = from < fromDate ? fromDate : from;
   const raw = await client.fetchTopixRange(effectiveFrom.replaceAll("-", ""), toDate.replaceAll("-", ""));
-  const rows = buildIndexRows(indexCode, raw, nowIso());
+  const allRows = buildIndexRows(indexCode, raw, nowIso());
+
+  let rows = allRows;
+  if (Number.isFinite(writeBudget)) {
+    const maxRows = Math.max(0, Math.floor(writeBudget / WRITES_PER_INDEX_ROW));
+    if (allRows.length > maxRows) {
+      rows = [...allRows].sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0)).slice(0, maxRows);
+    }
+  }
   await upsertIndexRows(d1, rows);
-  return { from: effectiveFrom, to: toDate, rows: rows.length };
+  return {
+    from: effectiveFrom,
+    to: toDate,
+    rows: rows.length,
+    remaining: allRows.length - rows.length,
+    stoppedBy: rows.length < allRows.length ? "write-budget" : null,
+  };
 }
 
 /**

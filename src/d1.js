@@ -35,6 +35,15 @@ export class D1QuotaError extends Error {
   }
 }
 
+/**
+ * D1QuotaError(書き込み上限)のときだけ、そのまま投げ直す。それ以外のエラーは何もしない。
+ * 「失敗しても続行」するcatchの先頭で呼ぶ: 上限に達した状態は、続行しても書き込めない(失敗が続くだけ)ため、
+ * 通常の取得失敗と同じ扱いで握りつぶさず、呼び出し元(ジョブ全体のcatch)に伝えて安全に終了させる。
+ */
+export function rethrowIfD1QuotaError(err) {
+  if (err instanceof D1QuotaError || err?.name === "D1QuotaError") throw err;
+}
+
 const WRITE_STATEMENT = /^\s*(insert|update|delete|replace|create|drop|alter)\b/i;
 
 export class D1Client {

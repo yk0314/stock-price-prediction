@@ -14,7 +14,7 @@
 // 任意: JQUANTS_PLAN, PRICE_SYNC_LOOKBACK_DAYS, D1_DAILY_WRITE_BUDGET, D1_ROWS_PER_REQUEST
 import { config } from "../src/config.js";
 import { JQuantsClient } from "../src/jquants.js";
-import { D1Client } from "../src/d1.js";
+import { D1Client, rethrowIfD1QuotaError } from "../src/d1.js";
 import { jstDateString, resolveLatestAvailableDate } from "../src/cutoff.js";
 import { addDays, parseTradingCalendar, tradingDaysBetween, weekdayDates } from "../src/tradingCalendar.js";
 import { buildListedInfoByCode } from "../src/listedInfo.js";
@@ -78,6 +78,8 @@ async function main() {
       masterResult = await syncStocksMaster({ d1, listedInfoByCode });
       console.log(`[sync-prices] 銘柄マスタ: 全${masterResult.total}銘柄中、新規・変更${masterResult.written}件を書き込み`);
     } catch (err) {
+      // 書き込み上限(D1QuotaError)は「続行」できない状態。握りつぶさず、main()のcatchで報告して安全に終了する
+      rethrowIfD1QuotaError(err);
       console.warn(`[sync-prices] 銘柄マスタの同期に失敗(続行): ${err.message}`);
     }
 
@@ -127,11 +129,24 @@ async function main() {
     }
 
     // 5) TOPIX
+    // この実行の予算(runBudget)のうち、銘柄マスタ・株価・株式分割の再取得で使った残りだけを使う(超える分は次回に回す)
     let indexResult = null;
     try {
-      indexResult = await syncIndexPrices({ client, d1, indexCode: config.MARKET.indexCode, fromDate: startDate, toDate: latestDate });
-      console.log(`[sync-prices] ${config.MARKET.indexCode}: ${indexResult.from}〜${indexResult.to} の${indexResult.rows}行を保存`);
+      indexResult = await syncIndexPrices({
+        client,
+        d1,
+        indexCode: config.MARKET.indexCode,
+        fromDate: startDate,
+        toDate: latestDate,
+        writeBudget: Math.max(0, runBudget - d1.stats.rowsWritten),
+      });
+      console.log(
+        `[sync-prices] ${config.MARKET.indexCode}: ${indexResult.from}〜${indexResult.to} の${indexResult.rows}行を保存` +
+          (indexResult.stoppedBy ? ` / 停止理由=${indexResult.stoppedBy}(残り${indexResult.remaining}行は次回以降)` : "")
+      );
     } catch (err) {
+      // 書き込み上限(D1QuotaError)は「続行」できない状態。握りつぶさず、main()のcatchで報告して安全に終了する
+      rethrowIfD1QuotaError(err);
       console.warn(`[sync-prices] ${config.MARKET.indexCode}の同期に失敗(続行。契約プランで使えない場合は403): ${err.message}`);
     }
 

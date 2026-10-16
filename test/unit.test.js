@@ -2198,6 +2198,56 @@ await test("onCandidateCompleteフックが成功/失敗それぞれで正しい
   }
 });
 
+console.log("[test] pipeline.js (Geminiの結果の集計: 成功・除外・失敗・未処理)");
+
+await test("createGeminiTally: 成功・除外・失敗に分け、未処理は送信数から求める(合計は常に送信数と一致する)", async () => {
+  const { createGeminiTally } = await import("../src/pipeline.js");
+  const tally = createGeminiTally();
+  // 除外(買う価値なし)はエラーではない。失敗とは別に数える
+  tally.record({ success: true, excluded: false });
+  tally.record({ success: true, excluded: false });
+  tally.record({ success: false, excluded: true });
+  tally.record({ success: false, excluded: true });
+  tally.record({ success: false, excluded: true });
+  tally.record({ success: false, excluded: false });
+  const summary = tally.summarize(10);
+  assert.deepEqual(summary, { sent: 10, succeeded: 2, excluded: 3, failed: 1, unprocessed: 4 });
+  assert.equal(summary.succeeded + summary.excluded + summary.failed + summary.unprocessed, summary.sent);
+  // 何も処理していない場合は、すべて未処理
+  assert.deepEqual(createGeminiTally().summarize(3), { sent: 3, succeeded: 0, excluded: 0, failed: 0, unprocessed: 3 });
+});
+
+await test("analyzeCandidates + createGeminiTally: 成功・除外・失敗・日次上限による未処理の合計が送信数と一致し、成功数は返された結果の件数と同じ", async () => {
+  const originalFetch = global.fetch;
+  const originalLimit = config.GEMINI.dailyRequestLimit;
+  const { analyzeCandidates } = await import("../src/gemini.js");
+  const { createGeminiTally } = await import("../src/pipeline.js");
+  global.fetch = async (url, opts) => {
+    const code = JSON.parse(opts.body).contents[0].parts[0].text.match(/銘柄コード (\w+)/)[1];
+    if (code === "8002") return geminiJsonResponse({ ...validGeminiResult(code), tradeable: false }); // 買う価値なし(除外)
+    if (code === "8003") return geminiJsonResponse({ message: "err" }, 500); // 失敗(リトライ対象外)
+    return geminiJsonResponse(validGeminiResult(code));
+  };
+  config.GEMINI.dailyRequestLimit = 4; // 4件処理したところで打ち切る(残りは未処理)
+  const tally = createGeminiTally();
+  try {
+    const candidates = ["8001", "8002", "8003", "8004", "8005", "8006"].map((c) => makeGeminiFeature(c));
+    const results = await analyzeCandidates(
+      "key",
+      candidates,
+      { cutoffDate: "2026-09-19", predictionExecutedAt: "t" },
+      { onCandidateComplete: (outcome) => tally.record(outcome) }
+    );
+    const summary = tally.summarize(candidates.length);
+    assert.deepEqual(summary, { sent: 6, succeeded: 2, excluded: 1, failed: 1, unprocessed: 2 });
+    assert.equal(summary.succeeded, results.length);
+    assert.equal(summary.succeeded + summary.excluded + summary.failed + summary.unprocessed, summary.sent);
+  } finally {
+    global.fetch = originalFetch;
+    config.GEMINI.dailyRequestLimit = originalLimit;
+  }
+});
+
 config.GEMINI.requestIntervalMs = geminiOriginalIntervalMs;
 config.GEMINI.retryBackoffBaseMs = geminiOriginalBackoffMs;
 

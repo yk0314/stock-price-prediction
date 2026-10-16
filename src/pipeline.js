@@ -98,6 +98,27 @@ export function buildCombinedCandidates(heldExtraCandidates, geminiCandidates, a
   return combined;
 }
 
+/**
+ * Geminiの各銘柄の結果(analyzeCandidatesのonCandidateCompleteに渡されるoutcome)を、
+ * 成功 / 除外(「買う価値なし」と判定された正常な結果。エラーではない) / 失敗 に分けて数える。
+ * 未処理(1日のリクエスト上限や429の連続で着手しなかった銘柄)は、送信数から処理済みを引いて求める。
+ * 成功・除外・失敗・未処理の合計は、常に送信数と一致する。
+ */
+export function createGeminiTally() {
+  const counts = { succeeded: 0, excluded: 0, failed: 0 };
+  return {
+    record(outcome) {
+      if (outcome?.excluded) counts.excluded++;
+      else if (outcome?.success) counts.succeeded++;
+      else counts.failed++;
+    },
+    summarize(sentCount) {
+      const processed = counts.succeeded + counts.excluded + counts.failed;
+      return { sent: sentCount, ...counts, unprocessed: sentCount - processed };
+    },
+  };
+}
+
 async function main() {
   const startedAt = new Date();
   const predictionExecutedAt = startedAt.toISOString();
@@ -497,8 +518,7 @@ async function main() {
   const savedEvaluationIds = [];
   const aiEvaluationFailures = [];
   // Geminiの結果の内訳(除外=「買う価値なし」はエラーではない)
-  let geminiExcludedCount = 0;
-  let geminiFailedCount = 0;
+  const geminiTally = createGeminiTally();
 
   const analysisResults = await analyzeCandidates(
     process.env.GEMINI_API_KEY,
@@ -506,8 +526,7 @@ async function main() {
     { cutoffDate, predictionExecutedAt },
     {
       onCandidateComplete: async (outcome) => {
-        if (outcome.excluded) geminiExcludedCount++;
-        else if (!outcome.success) geminiFailedCount++;
+        geminiTally.record(outcome);
         if (!d1) return; // D1未接続時は即時保存もエラーログ記録もできないため何もしない
         if (outcome.excluded) {
           // 新規候補が「買う価値なし」と判定されただけであり、エラーではない。
@@ -544,9 +563,16 @@ async function main() {
       },
     }
   );
-  apiErrorCounts.gemini429OrError = geminiFailedCount; // 本物の失敗のみ(除外は含めない)
+  const geminiSummary = geminiTally.summarize(combinedCandidates.length);
+  apiErrorCounts.gemini429OrError = geminiSummary.failed; // 本物の失敗のみ(除外は含めない)
+  if (geminiSummary.succeeded !== analysisResults.length) {
+    // 通常は一致する(結果の通知は処理した銘柄ごとに1回)。ずれたら集計の不具合なので、気付けるようにする
+    console.warn(
+      `[pipeline] gemini: 集計が一致しません(通知で数えた成功=${geminiSummary.succeeded}件 / 返された結果=${analysisResults.length}件)`
+    );
+  }
   console.log(
-    `[pipeline] gemini: 送信${combinedCandidates.length}件(うち保有銘柄の再評価対象${heldExtraCandidates.length}件) → 成功${analysisResults.length}件 / 除外(買う価値なし)${geminiExcludedCount}件 / 失敗${geminiFailedCount}件 / 未処理${combinedCandidates.length - analysisResults.length - geminiExcludedCount - geminiFailedCount}件`
+    `[pipeline] gemini: 送信${geminiSummary.sent}件(うち保有銘柄${combinedCandidates.filter((c) => c.isHeld).length}件) → 成功${geminiSummary.succeeded}件 / 除外(買う価値なし)${geminiSummary.excluded}件 / 失敗${geminiSummary.failed}件 / 未処理${geminiSummary.unprocessed}件`
   );
   await writeArtifact("gemini-results.json", analysisResults);
 
