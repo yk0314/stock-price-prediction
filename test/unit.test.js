@@ -2198,6 +2198,37 @@ await test("onCandidateCompleteフックが成功/失敗それぞれで正しい
   }
 });
 
+console.log("[test] pipeline.js (buildCombinedCandidates: 保有銘柄を先頭にまとめる)");
+
+await test("buildCombinedCandidates: 通常候補と重複した保有銘柄も先頭へ移し、それぞれの順序は保ち、二重に送らない", async () => {
+  const { buildCombinedCandidates } = await import("../src/pipeline.js");
+  const cand = (code) => ({ code });
+  const extra = [cand("1111"), cand("2222")]; // 追加分(通常候補に含まれない保有銘柄)
+  const normal = [cand("3001"), cand("3002"), cand("3003"), cand("3004"), cand("3005")]; // 3003・3005は保有(重複ケース)
+  const held = new Set(["1111", "2222", "3003", "3005"]);
+  const combined = buildCombinedCandidates(extra, normal, held);
+  assert.deepEqual(
+    combined.map((c) => c.code),
+    ["1111", "2222", "3003", "3005", "3001", "3002", "3004"]
+  );
+  assert.deepEqual(
+    combined.map((c) => c.isHeld),
+    [true, true, true, true, false, false, false]
+  );
+  assert.equal(new Set(combined.map((c) => c.code)).size, combined.length); // 二重に送らない
+});
+
+await test("buildCombinedCandidates: 保有銘柄が無い・すべて保有のときは、元の並びのまま", async () => {
+  const { buildCombinedCandidates } = await import("../src/pipeline.js");
+  const cand = (code) => ({ code });
+  const none = buildCombinedCandidates([], [cand("3001"), cand("3002")], new Set());
+  assert.deepEqual(none.map((c) => c.code), ["3001", "3002"]);
+  assert.deepEqual(none.map((c) => c.isHeld), [false, false]);
+  const all = buildCombinedCandidates([cand("1111")], [cand("3001"), cand("3002")], new Set(["1111", "3001", "3002"]));
+  assert.deepEqual(all.map((c) => c.code), ["1111", "3001", "3002"]);
+  assert.ok(all.every((c) => c.isHeld));
+});
+
 console.log("[test] pipeline.js (Geminiの結果の集計: 成功・除外・失敗・未処理)");
 
 await test("createGeminiTally: 成功・除外・失敗に分け、未処理は送信数から求める(合計は常に送信数と一致する)", async () => {

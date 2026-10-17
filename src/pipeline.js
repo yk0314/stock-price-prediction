@@ -83,7 +83,10 @@ export function selectHeldExtraCandidates(heldCodes, normalCandidateCodes, featu
  * Gemini処理順は「①保有銘柄 → ②新規候補」。保有銘柄は既存仕様どおり必ず再評価対象にし、
  * 通常候補と重複する銘柄(=元々geminiCandidatesに含まれていた保有銘柄)は二重に送らない
  * （heldExtraCandidatesは元々selectHeldExtraCandidates()で重複を除いた「追加分」のみなので、
- *  単純に前後を入れ替えて連結するだけでよい）。
+ *  連結するだけで重複しない）。
+ * 通常候補の中にあった保有銘柄も、①の側(先頭)へ移す。そのままの位置に残すと、
+ * 1回のリクエスト上限や429の連続による打ち切りで、保有銘柄の再評価が漏れる恐れがあるため。
+ * 先頭へ移す際の並びは、それぞれの元の順序を保つ(安定な並べ替え)。
  * 各候補には isHeld フラグを付与する。heldExtraCandidatesだけでなく、通常候補の中に
  * 元々保有銘柄が含まれていた場合(重複ケース)も正しくisHeld=trueにするため、
  * allHeldCodes(保有銘柄の全量)との突き合わせで判定する
@@ -95,7 +98,7 @@ export function buildCombinedCandidates(heldExtraCandidates, geminiCandidates, a
   for (const candidate of combined) {
     candidate.isHeld = allHeldCodes.has(candidate.code);
   }
-  return combined;
+  return [...combined.filter((c) => c.isHeld), ...combined.filter((c) => !c.isHeld)];
 }
 
 /**
