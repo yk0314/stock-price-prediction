@@ -88,6 +88,32 @@ test("保有日数が経過していない評価・株価の無い評価・カ�
   assert.equal(out[5].skipped.notElapsed, 1);
 });
 
+test("基準日が生成された日より何日も前の評価(約3か月前のデータに基づく評価)は、古い情報なので除外する", () => {
+  const { pricesByCode, evaluations } = baseData();
+  const stale = [
+    ...evaluations, // 基準日10/1・生成も10/1(通常の評価)
+    // 基準日10/1だが、20日後に生成された評価(有料プラン移行前の、遅延したデータに基づく評価に相当)
+    { code: "A", data_as_of_date: "2026-10-01", generated_at: "2026-10-21T08:00:00.000Z", score: 99, rating: "BUY" },
+  ];
+  const out = buildBacktestRows({ evaluations: stale, pricesByCode, tradingDays: DAYS, horizons: [1] });
+  // 同じ(銘柄, 基準日)の評価は、最も早い1件(通常の評価)が使われるので、古い評価は重複として落ちる
+  assert.equal(out[1].rows.length, 3);
+  assert.equal(out[1].skipped.staleBasis, 0);
+  // 古い評価だけがある場合は、除外されて数えられる
+  const onlyStale = [{ code: "A", data_as_of_date: "2026-10-01", generated_at: "2026-10-21T08:00:00.000Z", score: 99, rating: "BUY" }];
+  const out2 = buildBacktestRows({ evaluations: onlyStale, pricesByCode, tradingDays: DAYS, horizons: [1] });
+  assert.equal(out2[1].rows.length, 0);
+  assert.equal(out2[1].skipped.staleBasis, 1);
+  // 判定を無効にすれば(null)、除外されない(この例では買う日がカレンダーの外になり「未経過」になる)
+  const off = buildBacktestRows({ evaluations: onlyStale, pricesByCode, tradingDays: DAYS, horizons: [1], maxStaleDays: null });
+  assert.equal(off[1].skipped.staleBasis, 0);
+  assert.equal(off[1].skipped.notElapsed, 1);
+  // 通常の遅れ(週末をはさんだ3日)は除外されない
+  const weekend = [{ code: "A", data_as_of_date: "2026-10-02", generated_at: "2026-10-05T00:30:00.000Z", score: 70, rating: "BUY" }];
+  const out3 = buildBacktestRows({ evaluations: weekend, pricesByCode, tradingDays: DAYS, horizons: [1] });
+  assert.equal(out3[1].skipped.staleBasis, 0);
+});
+
 test("同じ(銘柄, 基準日)の評価が複数あるときは、最も早く生成された1件だけを使う", () => {
   const evals = [
     { code: "A", data_as_of_date: "2026-10-01", generated_at: "2026-10-01T13:00:00.000Z", score: 10 },

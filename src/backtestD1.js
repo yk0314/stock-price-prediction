@@ -8,6 +8,8 @@
 //   - 買った日を1日目として、N営業日目(N = 保有日数 horizon)の終値で売る。
 //   - 往復の手数料・価格差の合計を costPct(%)として差し引いた「コスト控除後」も計算する。
 // 注意:
+//   - 評価の基準日が、生成された日より maxStaleDays(既定5)日より前のものは、古い情報に基づく評価なので除外する
+//     (有料プランへ移行する前は、約3か月前を基準日にして評価していた。そのような評価の成績は、今の運用を表さない)。
 //   - 同じ(銘柄, 基準日)の評価が複数回ある場合(同じ日に複数回実行したとき)は、最も早く生成された1件だけを使う。
 //   - 株価は、D1に蓄積した調整後の値(株式分割の影響を受けない)を、同じ系列の中で比べる。
 //   - 「買う価値なし」と判定された銘柄はD1に保存されないため、その判定の良し悪しは測れない。
@@ -129,12 +131,13 @@ export function buildBacktestRows({
   topixByDate = new Map(),
   horizons = DEFAULT_HORIZONS,
   costPct = 0,
+  maxStaleDays = 5,
 }) {
   const dayIndex = new Map(tradingDays.map((d, i) => [d, i]));
   const unique = dedupeEvaluations(evaluations);
   const result = {};
   for (const h of horizons) {
-    result[h] = { rows: [], skipped: { noScore: 0, noCalendar: 0, notElapsed: 0, noPrice: 0 }, delayedEntry: 0 };
+    result[h] = { rows: [], skipped: { noScore: 0, staleBasis: 0, noCalendar: 0, notElapsed: 0, noPrice: 0 }, delayedEntry: 0 };
   }
 
   for (const e of unique) {
@@ -147,6 +150,14 @@ export function buildBacktestRows({
       if (!Number.isFinite(score)) {
         bucket.skipped.noScore++;
         continue;
+      }
+      // 基準日が古すぎる評価(生成された日より何日も前のデータに基づく評価)は、今の運用を表さないため除外する
+      if (maxStaleDays !== null && Number.isFinite(maxStaleDays) && Number.isFinite(generated)) {
+        const staleDays = (generated - Date.parse(`${e.data_as_of_date}T00:00:00Z`)) / 86400000;
+        if (staleDays > maxStaleDays) {
+          bucket.skipped.staleBasis++;
+          continue;
+        }
       }
       if (tIdx === undefined) {
         bucket.skipped.noCalendar++;
@@ -310,6 +321,9 @@ export function formatBacktestReport({ meta, results }) {
   lines.push(`- 評価: ${meta.evaluationsUnique}件(重複除去前 ${meta.evaluationsRaw}件)、基準日 ${meta.signalDateMin}〜${meta.signalDateMax}`);
   lines.push("- 約定の仮定: 基準日の翌営業日の始値で買い、保有日数目の終値で売る(寄り付きに間に合わない評価は、次の営業日の始値)");
   lines.push(`- 往復コスト: ${meta.costPct}%(コスト控除後の成績で集計) / 上位N: ${meta.topN} / スコア帯: ${meta.bands}`);
+  if (meta.maxStaleDays !== undefined && meta.maxStaleDays !== null) {
+    lines.push(`- 評価の基準日が、生成された日より${meta.maxStaleDays}日より前のものは、古い情報に基づくため除外`);
+  }
   lines.push("- **注意**: 期間が短く、相場環境が限られています。結果は将来の利益を保証しません。信頼区間が0をまたぐ差は、差があるとは言えません。");
   lines.push("- 「買う価値なし」と判定された銘柄はD1に保存されないため、その判定は測れません。");
 
@@ -318,7 +332,7 @@ export function formatBacktestReport({ meta, results }) {
     lines.push("");
     lines.push(`## 保有 ${h} 営業日`);
     lines.push(
-      `対象 ${summary.n}件 / 未経過 ${skipped.notElapsed} / 株価なし ${skipped.noPrice} / 営業日カレンダーに無い基準日 ${skipped.noCalendar} / スコアなし ${skipped.noScore} / 寄り付きに間に合わず買う日をずらした ${delayedEntry}`
+      `対象 ${summary.n}件 / 基準日が古すぎて除外 ${skipped.staleBasis} / 未経過 ${skipped.notElapsed} / 株価なし ${skipped.noPrice} / 営業日カレンダーに無い基準日 ${skipped.noCalendar} / スコアなし ${skipped.noScore} / 寄り付きに間に合わず買う日をずらした ${delayedEntry}`
     );
     if (summary.n === 0) {
       lines.push("集計できる評価がありません。");

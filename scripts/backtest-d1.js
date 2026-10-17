@@ -3,8 +3,8 @@
 //
 // 使い方:
 //   必要な環境変数: CF_ACCOUNT_ID, CF_D1_DATABASE_ID, CF_API_TOKEN(D1の読み取りだけを行う)
-//   node scripts/backtest-d1.js [--from 2026-10-05] [--horizons 1,3,5] [--cost-pct 0.3] [--top 10] [--bands 3]
-//   (環境変数 BACKTEST_FROM / BACKTEST_HORIZONS / BACKTEST_COST_PCT / BACKTEST_TOP / BACKTEST_BANDS でも指定できる。引数が優先)
+//   node scripts/backtest-d1.js [--from 2026-10-05] [--horizons 1,3,5] [--cost-pct 0.3] [--top 10] [--bands 3] [--max-stale-days 5]
+//   (環境変数 BACKTEST_FROM / BACKTEST_HORIZONS / BACKTEST_COST_PCT / BACKTEST_TOP / BACKTEST_BANDS / BACKTEST_MAX_STALE_DAYS でも指定できる。引数が優先)
 //
 // D1には SELECT しか実行しない(書き込み・マイグレーションは一切しない)。
 import { appendFile } from "node:fs/promises";
@@ -26,6 +26,7 @@ function parseArgs(argv, env) {
   const costRaw = String(get("cost-pct", "BACKTEST_COST_PCT")).trim();
   const topRaw = String(get("top", "BACKTEST_TOP")).trim();
   const bandsRaw = String(get("bands", "BACKTEST_BANDS")).trim();
+  const staleRaw = String(get("max-stale-days", "BACKTEST_MAX_STALE_DAYS")).trim();
 
   if (fromRaw && !/^\d{4}-\d{2}-\d{2}$/.test(fromRaw)) throw new Error(`--from は YYYY-MM-DD 形式で指定してください: ${fromRaw}`);
   const horizons = horizonsRaw ? horizonsRaw.split(",").map((s) => Number(s.trim())) : DEFAULT_HORIZONS;
@@ -36,7 +37,9 @@ function parseArgs(argv, env) {
   if (!Number.isInteger(topN) || topN < 1 || topN > 100) throw new Error(`--top は1〜100の整数で指定してください: ${topRaw}`);
   const bands = bandsRaw ? Number(bandsRaw) : 3;
   if (!Number.isInteger(bands) || bands < 1 || bands > 10) throw new Error(`--bands は1〜10の整数で指定してください: ${bandsRaw}`);
-  return { from: fromRaw || null, horizons: [...new Set(horizons)].sort((a, b) => a - b), costPct, topN, bands };
+  const maxStaleDays = staleRaw ? Number(staleRaw) : 5;
+  if (!Number.isInteger(maxStaleDays) || maxStaleDays < 1 || maxStaleDays > 60) throw new Error(`--max-stale-days は1〜60の整数で指定してください: ${staleRaw}`);
+  return { from: fromRaw || null, horizons: [...new Set(horizons)].sort((a, b) => a - b), costPct, topN, bands, maxStaleDays };
 }
 
 /** 読み取り専用の問い合わせ。SELECT以外は実行しない。 */
@@ -52,7 +55,7 @@ async function main() {
     databaseId: process.env.CF_D1_DATABASE_ID,
     apiToken: process.env.CF_API_TOKEN,
   });
-  console.log(`[backtest-d1] 開始: horizons=${args.horizons.join(",")} / costPct=${args.costPct} / top=${args.topN} / bands=${args.bands} / from=${args.from ?? "(最初の評価から)"}`);
+  console.log(`[backtest-d1] 開始: horizons=${args.horizons.join(",")} / costPct=${args.costPct} / top=${args.topN} / bands=${args.bands} / maxStaleDays=${args.maxStaleDays} / from=${args.from ?? "(最初の評価から)"}`);
 
   // 1) AI評価(新規候補のpipeline由来だけ。保有銘柄の再評価は、選び方が違うので含めない)
   const evaluations = await select(
@@ -96,7 +99,7 @@ async function main() {
     console.warn(`[backtest-d1] TOPIXを読めなかったため、TOPIXとの比較は省略します: ${err.message}`);
   }
 
-  const built = buildBacktestRows({ evaluations, pricesByCode, tradingDays, topixByDate, horizons: args.horizons, costPct: args.costPct });
+  const built = buildBacktestRows({ evaluations, pricesByCode, tradingDays, topixByDate, horizons: args.horizons, costPct: args.costPct, maxStaleDays: args.maxStaleDays });
   const evaluationsUnique = new Set(evaluations.map((e) => `${e.code}|${e.data_as_of_date}`)).size;
   const results = {};
   for (const h of args.horizons) {
@@ -117,6 +120,7 @@ async function main() {
     costPct: args.costPct,
     topN: args.topN,
     bands: args.bands,
+    maxStaleDays: args.maxStaleDays,
     d1: d1.stats,
   };
 

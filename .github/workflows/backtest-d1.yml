@@ -20,6 +20,10 @@ on:
         description: "毎日のスコア上位N件(省略時は10)"
         required: false
         default: ""
+      maxStaleDays:
+        description: "評価の基準日が、生成された日よりこの日数より前のものは除外する(省略時は5)"
+        required: false
+        default: ""
 
 jobs:
   run-backtest-d1:
@@ -43,6 +47,7 @@ jobs:
           BACKTEST_HORIZONS: ${{ inputs.horizons }}
           BACKTEST_COST_PCT: ${{ inputs.costPct }}
           BACKTEST_TOP: ${{ inputs.top }}
+          BACKTEST_MAX_STALE_DAYS: ${{ inputs.maxStaleDays }}
         run: node scripts/backtest-d1.js
 
       - name: 結果(data/)をartifactとしてアップロード
