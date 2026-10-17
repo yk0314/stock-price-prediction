@@ -1,0 +1,211 @@
+// D1ベースのバックテスト(src/backtestD1.js)のテスト。外部通信・D1には触れない(合成データ)。
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import {
+  bootstrapMeanCI,
+  buildBacktestRows,
+  dedupeEvaluations,
+  formatBacktestReport,
+  mean,
+  median,
+  rank,
+  spearman,
+  stdev,
+  summarizeBacktest,
+} from "../src/backtestD1.js";
+
+// 営業日: 10/1(木) 10/2(金) 10/5(月) 10/6(火) 10/7(水) 10/8(木)
+const DAYS = ["2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"];
+const px = (entries) => new Map(Object.entries(entries).map(([d, [open, close]]) => [d, { open, close }]));
+
+function baseData() {
+  const pricesByCode = new Map([
+    // A: 翌営業日(10/2)の始値100 → 10/2終値110, 10/6終値120
+    ["A", px({ "2026-10-01": [99, 100], "2026-10-02": [100, 110], "2026-10-05": [110, 115], "2026-10-06": [115, 120] })],
+    // B: 始値100 → 10/2終値100, 10/6終値100
+    ["B", px({ "2026-10-01": [99, 100], "2026-10-02": [100, 100], "2026-10-05": [100, 100], "2026-10-06": [100, 100] })],
+    // C: 始値100 → 10/2終値90, 10/6終値80
+    ["C", px({ "2026-10-01": [99, 100], "2026-10-02": [100, 90], "2026-10-05": [90, 85], "2026-10-06": [85, 80] })],
+  ]);
+  // 評価は10/1の17:00 JST(= 08:00 UTC)に生成 → 翌営業日10/2の寄り付き(10/2 00:00 UTC)に間に合う
+  const generated = "2026-10-01T08:00:00.000Z";
+  const evaluations = [
+    { code: "A", data_as_of_date: "2026-10-01", generated_at: generated, score: 80, rating: "BUY" },
+    { code: "B", data_as_of_date: "2026-10-01", generated_at: generated, score: 60, rating: "HOLD" },
+    { code: "C", data_as_of_date: "2026-10-01", generated_at: generated, score: 40, rating: "SELL" },
+  ];
+  return { pricesByCode, evaluations };
+}
+
+test("翌営業日の始値で買い、保有日数目の終値で売る。コスト控除後も出る", () => {
+  const { pricesByCode, evaluations } = baseData();
+  const out = buildBacktestRows({ evaluations, pricesByCode, tradingDays: DAYS, horizons: [1, 3], costPct: 0.2 });
+  const h1 = Object.fromEntries(out[1].rows.map((r) => [r.code, r]));
+  assert.equal(h1.A.entryDate, "2026-10-02");
+  assert.equal(h1.A.exitDate, "2026-10-02"); // 保有1営業日 = 買った日の終値で売る
+  assert.ok(Math.abs(h1.A.retPct - 10) < 1e-9);
+  assert.ok(Math.abs(h1.A.netPct - 9.8) < 1e-9);
+  assert.ok(Math.abs(h1.B.retPct - 0) < 1e-9);
+  assert.ok(Math.abs(h1.C.retPct - -10) < 1e-9);
+  // 参考: 評価日(10/1)の終値100で買えた場合
+  assert.ok(Math.abs(h1.A.refPct - 10) < 1e-9);
+  const h3 = Object.fromEntries(out[3].rows.map((r) => [r.code, r]));
+  assert.equal(h3.A.exitDate, "2026-10-06"); // 10/2を1日目として3営業日目
+  assert.ok(Math.abs(h3.A.retPct - 20) < 1e-9);
+  assert.ok(Math.abs(h3.C.retPct - -20) < 1e-9);
+});
+
+test("寄り付きに間に合わない評価は、買う日を次の営業日にずらす(未来の始値を使わない)", () => {
+  const { pricesByCode, evaluations } = baseData();
+  // 10/2 03:00 UTC(= 12:00 JST)に生成 → 10/2の始値はもう過ぎている → 10/5の始値で買う
+  const late = evaluations.map((e) => ({ ...e, generated_at: "2026-10-02T03:00:00.000Z" }));
+  const out = buildBacktestRows({ evaluations: late, pricesByCode, tradingDays: DAYS, horizons: [1] });
+  const a = out[1].rows.find((r) => r.code === "A");
+  assert.equal(a.entryDate, "2026-10-05");
+  assert.equal(a.exitDate, "2026-10-05");
+  assert.ok(Math.abs(a.retPct - ((115 / 110 - 1) * 100)) < 1e-9); // A: 10/5 始値110 → 終値115
+  assert.equal(out[1].delayedEntry, 3);
+});
+
+test("保有日数が経過していない評価・株価の無い評価・カレンダーに無い基準日は、集計から外して理由を数える", () => {
+  const { pricesByCode, evaluations } = baseData();
+  const more = [
+    ...evaluations,
+    { code: "D", data_as_of_date: "2026-10-01", generated_at: "2026-10-01T08:00:00.000Z", score: 70, rating: "BUY" }, // 株価なし
+    { code: "A", data_as_of_date: "2026-09-30", generated_at: "2026-09-30T08:00:00.000Z", score: 70, rating: "BUY" }, // 基準日がカレンダーに無い
+    { code: "A", data_as_of_date: "2026-10-07", generated_at: "2026-10-07T08:00:00.000Z", score: 70, rating: "BUY" }, // 買う日(10/8)はあるが、5営業日後は無い
+    { code: "A", data_as_of_date: "2026-10-05", generated_at: "2026-10-05T08:00:00.000Z", score: null, rating: "BUY" }, // スコアなし
+  ];
+  const out = buildBacktestRows({ evaluations: more, pricesByCode, tradingDays: DAYS, horizons: [1, 5] });
+  assert.equal(out[1].rows.length, 3);
+  assert.equal(out[1].skipped.noPrice, 2); // 銘柄D(株価なし)と、銘柄Aの10/8(株価なし)
+  assert.equal(out[1].skipped.noCalendar, 1);
+  assert.equal(out[1].skipped.noScore, 1);
+  assert.equal(out[1].skipped.notElapsed, 0);
+  // 5営業日: 10/1基準は10/8まで届くが10/8の株価が無い。10/7基準は10/8で買って5営業日後の日がまだ無い
+  assert.equal(out[5].rows.length, 0);
+  assert.equal(out[5].skipped.notElapsed, 1);
+});
+
+test("同じ(銘柄, 基準日)の評価が複数あるときは、最も早く生成された1件だけを使う", () => {
+  const evals = [
+    { code: "A", data_as_of_date: "2026-10-01", generated_at: "2026-10-01T13:00:00.000Z", score: 10 },
+    { code: "A", data_as_of_date: "2026-10-01", generated_at: "2026-10-01T08:00:00.000Z", score: 80 },
+    { code: "A", data_as_of_date: "2026-10-01", generated_at: "2026-10-01T23:00:00.000Z", score: 20 },
+    { code: "B", data_as_of_date: "2026-10-01", generated_at: "2026-10-01T08:00:00.000Z", score: 50 },
+  ];
+  const unique = dedupeEvaluations(evals);
+  assert.equal(unique.length, 2);
+  assert.equal(unique.find((e) => e.code === "A").score, 80);
+});
+
+test("TOPIXとの差: 買う日の始値から売る日の終値までのTOPIXの変化を引く", () => {
+  const { pricesByCode, evaluations } = baseData();
+  const topixByDate = new Map([
+    ["2026-10-02", { open: 2000, close: 2010 }],
+    ["2026-10-06", { open: 2030, close: 2040 }],
+  ]);
+  const out = buildBacktestRows({ evaluations, pricesByCode, tradingDays: DAYS, topixByDate, horizons: [3], costPct: 0 });
+  const a = out[3].rows.find((r) => r.code === "A");
+  const topixPct = (2040 / 2000 - 1) * 100; // 10/2始値 → 10/6終値
+  assert.ok(Math.abs(a.topixPct - topixPct) < 1e-9);
+  assert.ok(Math.abs(a.excessPct - (20 - topixPct)) < 1e-9);
+  // TOPIXが無ければ、差はnull(集計から外れる)
+  const noTopix = buildBacktestRows({ evaluations, pricesByCode, tradingDays: DAYS, horizons: [3] });
+  assert.equal(noTopix[3].rows[0].excessPct, null);
+});
+
+test("統計の部品: 平均・中央値・標準偏差・順位(同順位は平均)・スピアマン", () => {
+  assert.equal(mean([1, 2, 3]), 2);
+  assert.equal(median([1, 3, 2, 10]), 2.5);
+  assert.ok(Math.abs(stdev([2, 4, 4, 4, 5, 5, 7, 9]) - 2.138089935299395) < 1e-9);
+  assert.deepEqual(rank([10, 20, 20, 30]), [1, 2.5, 2.5, 4]);
+  assert.ok(Math.abs(spearman([1, 2, 3, 4, 5], [10, 20, 30, 40, 50]) - 1) < 1e-12);
+  assert.ok(Math.abs(spearman([1, 2, 3, 4, 5], [50, 40, 30, 20, 10]) - -1) < 1e-12);
+  assert.equal(spearman([1, 1, 1, 1], [1, 2, 3, 4]), null); // 一方が全て同じ値
+  assert.equal(spearman([1, 2], [1, 2]), null); // 3件未満
+});
+
+test("ブートストラップの信頼区間: 同じseedなら同じ結果。件数が2未満ならnull。平均をはさむ", () => {
+  const values = [1.2, -0.4, 0.8, 2.1, -1.0, 0.3, 1.5, 0.9];
+  const a = bootstrapMeanCI(values, { iterations: 500, seed: 7 });
+  const b = bootstrapMeanCI(values, { iterations: 500, seed: 7 });
+  assert.deepEqual(a, b);
+  assert.ok(a.lo <= mean(values) && mean(values) <= a.hi);
+  assert.equal(bootstrapMeanCI([1], {}), null);
+  assert.equal(bootstrapMeanCI([], {}), null);
+});
+
+// スコアが高いほど成績が良い合成データ(2日分、各日12件)で、集計を確かめる
+function syntheticRows() {
+  const rows = [];
+  for (const [day, bias] of [["2026-10-01", 0], ["2026-10-02", 1]]) {
+    for (let i = 0; i < 12; i++) {
+      const score = 50 + i; // 50〜61
+      const retPct = (i - 5.5) * 0.5 + bias; // スコアに比例して増える
+      rows.push({ code: `${day}-${i}`, signalDate: day, entryDate: day, exitDate: day, horizon: 3, score, rating: i >= 8 ? "BUY" : "HOLD", retPct, netPct: retPct - 0.3, refPct: null, topixPct: 0.2, excessPct: retPct - 0.2 });
+    }
+  }
+  return rows;
+}
+
+test("集計: スコア帯・rating別・毎日の上位Nと全件平均の差・順位相関・TOPIXとの差(コスト控除後)", () => {
+  const summary = summarizeBacktest(syntheticRows(), { topN: 3, bands: 3, iterations: 300, seed: 1 });
+  assert.equal(summary.n, 24);
+  assert.equal(summary.days, 2);
+  // 3つの帯: 件数は8ずつで、高スコアの帯ほど平均が高い
+  assert.deepEqual(summary.byBand.map((b) => b.n), [8, 8, 8]);
+  assert.ok(summary.byBand[0].meanNet < summary.byBand[1].meanNet && summary.byBand[1].meanNet < summary.byBand[2].meanNet);
+  assert.ok(summary.byBand[0].scoreMax <= summary.byBand[1].scoreMin);
+  // rating別
+  assert.equal(summary.byRating.BUY.n, 8);
+  assert.equal(summary.byRating.HOLD.n, 16);
+  assert.ok(summary.byRating.BUY.meanNet > summary.byRating.HOLD.meanNet);
+  // 毎日の上位3件 − 全件平均: スコアが成績と比例するので、差は正で、順位相関は1
+  assert.equal(summary.topN.days, 2);
+  assert.ok(summary.topN.mean > 0);
+  for (const d of summary.daily) {
+    assert.ok(d.diff > 0);
+    assert.ok(Math.abs(d.ic - 1) < 1e-12);
+  }
+  assert.ok(summary.topN.ci.lo <= summary.topN.mean && summary.topN.mean <= summary.topN.ci.hi);
+  // TOPIXとの差(コスト控除後) = 平均(retPct) - 0.2 - 0.3
+  const expected = mean(syntheticRows().map((r) => r.retPct)) - 0.2 - 0.3;
+  assert.ok(Math.abs(summary.overall.meanExcessNet - expected) < 1e-9);
+});
+
+test("集計: 件数がNに満たない日は上位Nの比較から外し、10件に満たない日は順位相関から外す。空なら件数0", () => {
+  const rows = syntheticRows().filter((r) => r.signalDate === "2026-10-01").slice(0, 5);
+  const summary = summarizeBacktest(rows, { topN: 10 });
+  assert.equal(summary.daily[0].diff, null);
+  assert.equal(summary.daily[0].ic, null);
+  assert.equal(summary.topN.days, 0);
+  assert.equal(summary.topN.ci, null);
+  assert.deepEqual(summarizeBacktest([], {}), { n: 0 });
+});
+
+test("レポート: 注意書き・各保有日数の見出し・表が出る", () => {
+  const { pricesByCode, evaluations } = baseData();
+  const built = buildBacktestRows({ evaluations, pricesByCode, tradingDays: DAYS, horizons: [1, 3] });
+  const results = {};
+  for (const h of [1, 3]) results[h] = { summary: summarizeBacktest(built[h].rows, { topN: 2, bands: 3 }), skipped: built[h].skipped, delayedEntry: built[h].delayedEntry };
+  const report = formatBacktestReport({
+    meta: { evaluationsUnique: 3, evaluationsRaw: 3, signalDateMin: "2026-10-01", signalDateMax: "2026-10-01", costPct: 0, topN: 2, bands: 3 },
+    results,
+  });
+  assert.match(report, /将来の利益を保証しません/);
+  assert.match(report, /## 保有 1 営業日/);
+  assert.match(report, /## 保有 3 営業日/);
+  assert.match(report, /\| 帯 \| 件数 \|/);
+  assert.match(report, /信頼区間が0をまたぐ差は、差があるとは言えません/);
+});
+
+test("バックテストのスクリプトは、D1に対してSELECTしか実行しない(書き込みの呼び出しを持たない)", () => {
+  const src = readFileSync(new URL("../scripts/backtest-d1.js", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /d1\.run\(|bulkUpsert|batchInsert|\bINSERT\b|\bDELETE\b|\bDROP\b|\bALTER\b/i);
+  assert.match(src, /SELECT以外は実行しません/);
+  const wf = readFileSync(new URL("../.github/workflows/backtest-d1.yml", import.meta.url), "utf8");
+  assert.match(wf, /workflow_dispatch/);
+  assert.doesNotMatch(wf, /^\s*schedule:/m); // 自動実行は追加しない
+});

@@ -19,7 +19,8 @@ Gemini API ───┘     │            └─▶ Cloudflare KV  (表示用�
                     │
                     ├─ pipeline.yml      平日 17:00 JST   特徴量 → スクリーニング → Gemini評価 → ランキング
                     ├─ sync-prices.yml   毎日 18:30 JST   全銘柄の日足・TOPIX・銘柄マスタをD1へ差分で蓄積
-                    └─ screening-backtest.yml  手動実行のみ  スクリーニングスコアの検証(Geminiは使わない)
+                    ├─ screening-backtest.yml  手動実行のみ  スクリーニングスコアの検証(Geminiは使わない)
+                    └─ backtest-d1.yml  手動実行のみ  D1のAI評価と株価から、評価後の値動きを測る(D1は読み取りのみ)
 
 Cloudflare Workers (worker/) : D1とKVを読むAPI + 売買履歴の登録・編集・取消API
 public/ (Cloudflare Pages)   : ホーム / ランキング / 保有銘柄 / 売買履歴(株価チャート・SBI発注補助を含む)
@@ -41,6 +42,7 @@ public/ (Cloudflare Pages)   : ホーム / ランキング / 保有銘柄 / 売�
 migrations/          D1のスキーマ(0001〜0005)
 scripts/
   sync-prices.js     株価・銘柄マスタ・TOPIXをD1へ蓄積するジョブ(sync-prices.yml が実行)
+  backtest-d1.js     D1のAI評価と全銘柄の日足から、評価後の値動きを測る読み取り専用のバックテスト(backtest-d1.yml が実行)
   probe-jquants.mjs  契約プランで使えるAPI・データ範囲を調べる読み取り専用スクリプト
   update-unit-tests.mjs  test/unit.test.js を更新した際の一回限りのパッチ(通常は使わない)
 src/
@@ -52,7 +54,8 @@ src/
   gemini.js          Gemini呼び出し(リトライ・出力検証・レート制限対策)
   d1.js / d1Sync.js / d1Repository.js / d1Budget.js / pipelineD1.js   D1への読み書き・差分蓄積・書き込み予算
   kv.js / artifacts.js   KVへの保存・中間データ(data/)の保存
-  backtest.js / analysis.js / backtest-run.js / screening-backtest.js   バックテスト・分析
+  backtest.js / analysis.js / backtest-run.js / screening-backtest.js   バックテスト・分析(KVの履歴・30営業日後が前提の旧来のもの)
+  backtestD1.js      D1のデータで評価後の値動きを測る純粋関数群(1・3・5営業日。scripts/backtest-d1.js から使う)
   orderAssist.js     発注補助の計算(株数・注文内容のテキスト)
 worker/              Cloudflare Workers の API(wrangler.toml / src/index.js / src/tradeLogic.mjs)
 public/              フロントエンド(index.html / app.js / style.css)
@@ -174,6 +177,7 @@ sync-prices の予算 = `min(D1_DAILY_WRITE_BUDGET, D1_DAILY_WRITE_TOTAL − 今
 
 - **pipeline.yml**(JP Stock AI Pipeline): 平日 17:00 JST(08:00 UTC)に自動実行。手動は Actions → Run workflow。入力: `cutoffDate`(空欄なら最新の取引日を自動判定)、`universeMode`(`phase1_subset` / `all`)。タイムアウト240分。1回の実行は、Gemini の待機時間(既定30秒 × 約155銘柄)のため、約90分かかります。
 - **sync-prices.yml**(Sync Prices): 毎日 18:30 JST(09:30 UTC)に自動実行。手動の入力: `lookbackDays`、`writeBudget`。タイムアウト60分。
+- **backtest-d1.yml**(JP Stock AI Backtest (D1)): 手動のみ。入力: `from`(この基準日以降の評価だけを使う)、`horizons`(保有日数。既定 1,3,5)、`costPct`(往復コスト%。既定0)、`top`(毎日の上位N件。既定10)。D1には読み取りだけを行い、結果は実行サマリと artifact(`data/backtest-d1.json`)に出る。
 - **screening-backtest.yml**: 手動のみ。`node test/unit.test.js` と `node src/screening-backtest.js` を実行する(J-Quantsだけを使い、Gemini・Cloudflareは使わない)。
 - pipeline と sync-prices は同じ `concurrency` グループで、同時には走りません(D1への書き込みが重ならないようにするため)。待機中の後続は、実行中のものを中断せず順番に実行されます。
 - Actionsのランナーは Node 20 です。
@@ -247,7 +251,7 @@ npm test
 
 ### 未実装・未完成
 
-- **バックテストの実用化**: 評価関数(`backtest.js`・`analysis.js`)とスクリーニングスコアの検証(`screening-backtest.js`)はあります。`backtest-run.js`(KVの履歴から30営業日後の実績を計算)を動かす専用のワークフローは、現在のリポジトリにありません。手数料・スリッページを含めた実データでの検証は行っていません。
+- **バックテスト**: D1のAI評価と全銘柄の日足を使う `backtest-d1.yml` があります(基準日の翌営業日の始値で買い、1・3・5営業日目の終値で売る。往復コストを指定すると、控除後の成績も出る)。出力は、スコア帯別・rating別・毎日の上位N件と全件平均の差(95%信頼区間つき)・順位相関・TOPIXとの差です。**評価が始まったのは9月末からで、期間が短く相場環境が限られるため、結果は参考値です**(件数が増えるごとに再計測します)。「買う価値なし」と判定された銘柄は、D1に保存されないため、その判定は測れません。従来の `backtest.js`・`backtest-run.js`(KVの履歴から30営業日後の実績を計算)を動かすワークフローは、現在のリポジトリにありません。手数料・スリッページは、利用者が指定する値(既定0%)で、実際の約定は確認していません。
 - AI評価の精度が改善したという根拠は、まだありません(バックテストで検証してから判断する)。
 - 「買う価値なし」と判定された銘柄の記録は残りません(D1に保存しない仕様)。
 - 失敗や障害を知らせる、アプリ独自の通知機能はありません。
