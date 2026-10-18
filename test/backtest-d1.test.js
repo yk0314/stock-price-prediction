@@ -9,7 +9,9 @@ import {
   formatBacktestReport,
   mean,
   median,
+  quantile,
   rank,
+  realizedVolatility,
   spearman,
   stdev,
   summarizeBacktest,
@@ -225,6 +227,159 @@ test("レポート: 注意書き・各保有日数の見出し・表が出る", 
   assert.match(report, /## 保有 3 営業日/);
   assert.match(report, /\| 帯 \| 件数 \|/);
   assert.match(report, /信頼区間が0をまたぐ差は、差があるとは言えません/);
+});
+
+// ---- ここから: 同点・外れ値・値動きの大きさ・指標別の分析 ----
+const mkRow = (day, i, { score = 70, net = 0, vol = null, up = null, down = null, exp = null, conf = null, rating = "BUY" } = {}) => ({
+  code: `${day}-${String(i).padStart(3, "0")}`, signalDate: day, entryDate: day, exitDate: day, horizon: 3,
+  score, rating, upsideProb: up, downsideRisk: down, expectedReturn: exp, confidence: conf, vol20: vol,
+  retPct: net, netPct: net, refPct: null, topixPct: null, excessPct: null,
+});
+
+test("分位点・実現ボラティリティ: 日次リターンの標準偏差(直近20営業日)。履歴が足りなければnull", () => {
+  assert.equal(quantile([1, 2, 3, 4, 5], 0.5), 3);
+  assert.equal(quantile([1, 2, 3, 4], 0.25), 1.75);
+  assert.equal(quantile([], 0.5), null);
+  // 日次リターンが +2%, -2% を交互に繰り返す21営業日分の終値
+  const days = Array.from({ length: 21 }, (_, i) => `D${String(i).padStart(2, "0")}`);
+  const closes = new Map();
+  let c = 100;
+  days.forEach((d, i) => {
+    if (i > 0) c *= i % 2 === 1 ? 1.02 : 0.98;
+    closes.set(d, { open: c, close: c });
+  });
+  const vol = realizedVolatility(closes, days, 20);
+  assert.ok(Math.abs(vol - Math.sqrt((20 * 4) / 19)) < 0.05, `vol=${vol}`); // 20個の±2%の標本標準偏差
+  assert.equal(realizedVolatility(closes, days, 8), null); // 8日分しか無い → null
+  assert.equal(realizedVolatility(undefined, days, 20), null);
+});
+
+test("上位N件: 同点が境目にまたがるときは無作為に選んだ期待値で計算する(コード順の同点処理の偏りを入れない)", () => {
+  // 20件すべて同点(70点)。コード順の先頭10件は +2%、残り10件は −2%(=コード順で選ぶと、見かけ上+2%の差が出てしまう)
+  const rows = [];
+  for (let d = 1; d <= 10; d++) {
+    const day = `2026-10-${String(d).padStart(2, "0")}`;
+    for (let i = 0; i < 20; i++) rows.push(mkRow(day, i, { score: 70, net: i < 10 ? 2 : -2 }));
+  }
+  const summary = summarizeBacktest(rows, { topN: 10, simulations: 300, randomPicks: 500, seed: 3 });
+  assert.ok(Math.abs(summary.topN.mean) < 0.1, `mean=${summary.topN.mean}`); // 期待値はほぼ0
+  assert.ok(summary.topN.randomPick.p > 0.2, `p=${summary.topN.randomPick.p}`);
+  assert.equal(summary.daily[0].tieAtCut, 20);
+  assert.equal(summary.daily[0].cutScore, 70);
+});
+
+test("上位N件: 同点がまたがらず、はっきり分かれているときは、その差がそのまま出る(期待値 = 実際)", () => {
+  const rows = [];
+  for (let d = 1; d <= 3; d++) {
+    const day = `2026-10-0${d}`;
+    for (let i = 0; i < 10; i++) rows.push(mkRow(day, i, { score: 75, net: 1 }));
+    for (let i = 10; i < 12; i++) rows.push(mkRow(day, i, { score: 60, net: -1 }));
+  }
+  const summary = summarizeBacktest(rows, { topN: 10, simulations: 50, randomPicks: 200 });
+  // 上位10件の平均 +1、全件の平均 (10 - 2) / 12
+  assert.ok(Math.abs(summary.topN.mean - (1 - 8 / 12)) < 1e-9);
+  assert.ok(Math.abs(summary.topN.median.mean - (1 - 1)) < 1e-9); // 中央値: 上位+1、全件(+1が10件, -1が2件)の中央値+1
+  assert.equal(summary.topN.positiveDays, 3);
+});
+
+test("値動きの大きさをそろえた比較: 上位が値動きの大きい銘柄ばかりで、その層が高い成績なだけなら、そろえた差は0になる", () => {
+  const rows = [];
+  for (let d = 1; d <= 3; d++) {
+    const day = `2026-10-0${d}`;
+    for (let i = 0; i < 10; i++) rows.push(mkRow(day, i, { score: 60, net: 0, vol: 1 })); // 低ボラ
+    for (let i = 10; i < 20; i++) rows.push(mkRow(day, i, { score: 60, net: 0, vol: 2 })); // 中ボラ
+    for (let i = 20; i < 30; i++) rows.push(mkRow(day, i, { score: 75, net: 2, vol: 3 })); // 高ボラ(上位10件はこの層)
+  }
+  const summary = summarizeBacktest(rows, { topN: 10, simulations: 50, randomPicks: 200 });
+  assert.ok(Math.abs(summary.topN.mean - (2 - 2 / 3)) < 1e-9); // 全件平均との差は +1.33
+  assert.ok(Math.abs(summary.topN.matched.mean) < 1e-9); // 値動きの層をそろえると差は0
+  assert.equal(summary.volCoverage, 1);
+});
+
+test("外れ値を丸めた差: 上位に1銘柄だけ極端な上昇があるとき、丸めると差が小さくなる", () => {
+  const rows = [];
+  for (let d = 1; d <= 2; d++) {
+    const day = `2026-10-0${d}`;
+    rows.push(mkRow(day, 0, { score: 75, net: 50 })); // 外れ値
+    for (let i = 1; i < 10; i++) rows.push(mkRow(day, i, { score: 75, net: 1 }));
+    for (let i = 10; i < 30; i++) rows.push(mkRow(day, i, { score: 60, net: 0 }));
+  }
+  const summary = summarizeBacktest(rows, { topN: 10, simulations: 20, randomPicks: 50, winsorPct: 5 });
+  assert.ok(summary.topN.mean > 3.5); // (50 + 9) / 10 − 59 / 30
+  assert.ok(summary.topN.winsorized.mean < 1); // 外れ値(50)を上側5%の値(1)に丸めると、上位の平均は1、全件の平均は10/30なので、差は 1 − 1/3
+  assert.ok(Math.abs(summary.topN.winsorized.mean - 2 / 3) < 1e-9);
+  assert.ok(summary.topN.median.mean < summary.topN.mean); // 中央値の差も小さい
+});
+
+test("スコアの水準別: 固定の区切りで分け、最上位の水準 − それ以外を日ごとの平均の差で出す(各3件以上の日のみ)", () => {
+  const rows = [];
+  for (let d = 1; d <= 3; d++) {
+    const day = `2026-10-0${d}`;
+    for (let i = 0; i < 4; i++) rows.push(mkRow(day, i, { score: 60, net: -1 }));
+    for (let i = 4; i < 8; i++) rows.push(mkRow(day, i, { score: 66, net: 0 }));
+    for (let i = 8; i < 12; i++) rows.push(mkRow(day, i, { score: 70, net: 0 }));
+    for (let i = 12; i < 15; i++) rows.push(mkRow(day, i, { score: 75, net: 3 }));
+  }
+  const summary = summarizeBacktest(rows, { topN: 5, scoreCuts: [62, 68, 72], simulations: 10, randomPicks: 20 });
+  assert.deepEqual(summary.byScoreLevel.map((g) => g.label), ["62未満", "62以上〜68未満", "68以上〜72未満", "72以上"]);
+  assert.deepEqual(summary.byScoreLevel.map((g) => g.n), [12, 12, 12, 9]);
+  // 最上位(72以上 = +3)−それ以外(平均 (−4 + 0 + 0) / 12 = −1/3)
+  assert.equal(summary.topLevel.days, 3);
+  assert.ok(Math.abs(summary.topLevel.mean - (3 + 1 / 3)) < 1e-9);
+  // 区切りを空にすると、水準別は全体の1行だけ
+  const none = summarizeBacktest(rows, { topN: 5, scoreCuts: [], simulations: 5, randomPicks: 5 });
+  assert.equal(none.byScoreLevel.length, 1);
+  assert.equal(none.topLevel, null);
+});
+
+test("指標別の順位相関: 上昇確率は成績と同じ向き(+1)、下落リスクは逆向き(−1)。値が全て同じ指標は相関を出さない", () => {
+  const rows = [];
+  for (let d = 1; d <= 3; d++) {
+    const day = `2026-10-0${d}`;
+    for (let i = 0; i < 12; i++) rows.push(mkRow(day, i, { score: 60 + (i % 3), net: i, up: 0.3 + i * 0.01, down: 30 - i, exp: i * 0.5, conf: 0.8 }));
+  }
+  const summary = summarizeBacktest(rows, { topN: 5, simulations: 5, randomPicks: 5 });
+  const by = Object.fromEntries(summary.byMetric.map((m) => [m.key, m]));
+  assert.ok(Math.abs(by.upsideProb.mean - 1) < 1e-12);
+  assert.ok(Math.abs(by.expectedReturn.mean - 1) < 1e-12);
+  assert.ok(Math.abs(by.downsideRisk.mean - -1) < 1e-12);
+  assert.equal(by.confidence.days, 0); // 全て同じ値 → 順位相関なし
+  assert.equal(by.confidence.mean, null);
+  assert.equal(by.upsideProb.positiveDays, 3);
+});
+
+test("行の指標・ボラティリティ: 評価の上昇確率などと、基準日までの実現ボラティリティが行に入る", () => {
+  const { pricesByCode, evaluations } = baseData();
+  const withMetrics = evaluations.map((e) => ({ ...e, upside_probability: 0.6, downside_risk: 20, expected_return: 3, confidence: 0.7 }));
+  const out = buildBacktestRows({ evaluations: withMetrics, pricesByCode, tradingDays: DAYS, horizons: [1] });
+  const a = out[1].rows.find((r) => r.code === "A");
+  assert.equal(a.upsideProb, 0.6);
+  assert.equal(a.downsideRisk, 20);
+  assert.equal(a.expectedReturn, 3);
+  assert.equal(a.confidence, 0.7);
+  assert.equal(a.vol20, null); // 基準日までの履歴が1日しか無く、ボラティリティは計算できない
+  const none = buildBacktestRows({ evaluations, pricesByCode, tradingDays: DAYS, horizons: [1] });
+  assert.equal(none[1].rows[0].upsideProb, null); // 指標が無い評価はnull
+});
+
+test("レポート(拡張): 固定のスコア帯・同点・外れ値・値動きの統制・指標別の相関の見出しが出る", () => {
+  const rows = [];
+  for (let d = 1; d <= 3; d++) {
+    const day = `2026-10-0${d}`;
+    for (let i = 0; i < 15; i++) rows.push(mkRow(day, i, { score: i < 12 ? 68 : 75, net: i * 0.1, vol: 1 + (i % 3), up: 0.5 + i * 0.01 }));
+  }
+  const summary = summarizeBacktest(rows, { topN: 5, simulations: 10, randomPicks: 50 });
+  const report = formatBacktestReport({
+    meta: { evaluationsUnique: 45, evaluationsRaw: 45, signalDateMin: "2026-10-01", signalDateMax: "2026-10-03", costPct: 0, topN: 5, bands: 3, scoreCuts: [62, 68, 72] },
+    results: { 3: { summary, skipped: { noScore: 0, staleBasis: 0, noCalendar: 0, notElapsed: 0, noPrice: 0 }, delayedEntry: 0 } },
+  });
+  assert.match(report, /スコアの水準別/);
+  assert.match(report, /同点は無作為/);
+  assert.match(report, /外れ値\(上下1%\)を丸めた差/);
+  assert.match(report, /値動きの大きさ.*をそろえた/);
+  assert.match(report, /指標ごとの、成績との順位相関/);
+  assert.match(report, /上昇確率\(upside_probability\)/);
+  assert.match(report, /スコアの区切り\(固定\): 62, 68, 72/);
 });
 
 test("バックテストのスクリプトは、D1に対してSELECTしか実行しない(書き込みの呼び出しを持たない)", () => {

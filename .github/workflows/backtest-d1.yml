@@ -24,6 +24,10 @@ on:
         description: "評価の基準日が、生成された日よりこの日数より前のものは除外する(省略時は5)"
         required: false
         default: ""
+      scoreCuts:
+        description: "スコアの水準を分ける区切りをカンマ区切りで指定(省略時は 62,68,72。最上位の水準 − それ以外も出る)"
+        required: false
+        default: ""
 
 jobs:
   run-backtest-d1:
@@ -48,6 +52,7 @@ jobs:
           BACKTEST_COST_PCT: ${{ inputs.costPct }}
           BACKTEST_TOP: ${{ inputs.top }}
           BACKTEST_MAX_STALE_DAYS: ${{ inputs.maxStaleDays }}
+          BACKTEST_SCORE_CUTS: ${{ inputs.scoreCuts }}
         run: node scripts/backtest-d1.js
 
       - name: 結果(data/)をartifactとしてアップロード

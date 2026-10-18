@@ -3,14 +3,15 @@
 //
 // 使い方:
 //   必要な環境変数: CF_ACCOUNT_ID, CF_D1_DATABASE_ID, CF_API_TOKEN(D1の読み取りだけを行う)
-//   node scripts/backtest-d1.js [--from 2026-10-05] [--horizons 1,3,5] [--cost-pct 0.3] [--top 10] [--bands 3] [--max-stale-days 5]
-//   (環境変数 BACKTEST_FROM / BACKTEST_HORIZONS / BACKTEST_COST_PCT / BACKTEST_TOP / BACKTEST_BANDS / BACKTEST_MAX_STALE_DAYS でも指定できる。引数が優先)
+//   node scripts/backtest-d1.js [--from 2026-10-05] [--horizons 1,3,5] [--cost-pct 0.3] [--top 10] [--bands 3] [--max-stale-days 5] [--score-cuts 62,68,72]
+//   (環境変数 BACKTEST_FROM / BACKTEST_HORIZONS / BACKTEST_COST_PCT / BACKTEST_TOP / BACKTEST_BANDS / BACKTEST_MAX_STALE_DAYS / BACKTEST_SCORE_CUTS でも指定できる。引数が優先)
 //
 // D1には SELECT しか実行しない(書き込み・マイグレーションは一切しない)。
 import { appendFile } from "node:fs/promises";
 import { config } from "../src/config.js";
 import { D1Client } from "../src/d1.js";
 import { writeArtifact } from "../src/artifacts.js";
+import { addDays } from "../src/tradingCalendar.js";
 import { DEFAULT_HORIZONS, buildBacktestRows, formatBacktestReport, summarizeBacktest } from "../src/backtestD1.js";
 
 const CODE_CHUNK = 90; // D1のバインド変数は1文につき100個まで(日付の1個を足しても超えない)
@@ -27,6 +28,7 @@ function parseArgs(argv, env) {
   const topRaw = String(get("top", "BACKTEST_TOP")).trim();
   const bandsRaw = String(get("bands", "BACKTEST_BANDS")).trim();
   const staleRaw = String(get("max-stale-days", "BACKTEST_MAX_STALE_DAYS")).trim();
+  const cutsRaw = String(get("score-cuts", "BACKTEST_SCORE_CUTS")).trim();
 
   if (fromRaw && !/^\d{4}-\d{2}-\d{2}$/.test(fromRaw)) throw new Error(`--from は YYYY-MM-DD 形式で指定してください: ${fromRaw}`);
   const horizons = horizonsRaw ? horizonsRaw.split(",").map((s) => Number(s.trim())) : DEFAULT_HORIZONS;
@@ -39,7 +41,9 @@ function parseArgs(argv, env) {
   if (!Number.isInteger(bands) || bands < 1 || bands > 10) throw new Error(`--bands は1〜10の整数で指定してください: ${bandsRaw}`);
   const maxStaleDays = staleRaw ? Number(staleRaw) : 5;
   if (!Number.isInteger(maxStaleDays) || maxStaleDays < 1 || maxStaleDays > 60) throw new Error(`--max-stale-days は1〜60の整数で指定してください: ${staleRaw}`);
-  return { from: fromRaw || null, horizons: [...new Set(horizons)].sort((a, b) => a - b), costPct, topN, bands, maxStaleDays };
+  const scoreCuts = cutsRaw ? cutsRaw.split(",").map((s) => Number(s.trim())) : [62, 68, 72];
+  if (scoreCuts.length > 6 || scoreCuts.some((c) => !Number.isFinite(c) || c < 0 || c > 100)) throw new Error(`--score-cuts は0〜100の数値を6個までカンマ区切りで指定してください: ${cutsRaw}`);
+  return { from: fromRaw || null, horizons: [...new Set(horizons)].sort((a, b) => a - b), costPct, topN, bands, maxStaleDays, scoreCuts: [...new Set(scoreCuts)].sort((a, b) => a - b) };
 }
 
 /** 読み取り専用の問い合わせ。SELECT以外は実行しない。 */
@@ -55,12 +59,12 @@ async function main() {
     databaseId: process.env.CF_D1_DATABASE_ID,
     apiToken: process.env.CF_API_TOKEN,
   });
-  console.log(`[backtest-d1] 開始: horizons=${args.horizons.join(",")} / costPct=${args.costPct} / top=${args.topN} / bands=${args.bands} / maxStaleDays=${args.maxStaleDays} / from=${args.from ?? "(最初の評価から)"}`);
+  console.log(`[backtest-d1] 開始: horizons=${args.horizons.join(",")} / costPct=${args.costPct} / top=${args.topN} / bands=${args.bands} / maxStaleDays=${args.maxStaleDays} / scoreCuts=${args.scoreCuts.join(",")} / from=${args.from ?? "(最初の評価から)"}`);
 
   // 1) AI評価(新規候補のpipeline由来だけ。保有銘柄の再評価は、選び方が違うので含めない)
   const evaluations = await select(
     d1,
-    "SELECT code, data_as_of_date, generated_at, score, rating FROM ai_evaluations WHERE source = 'pipeline' AND score IS NOT NULL AND data_as_of_date >= ?",
+    "SELECT code, data_as_of_date, generated_at, score, rating, upside_probability, downside_risk, expected_return, confidence FROM ai_evaluations WHERE source = 'pipeline' AND score IS NOT NULL AND data_as_of_date >= ?",
     [args.from ?? "1970-01-01"]
   );
   if (evaluations.length === 0) {
@@ -71,8 +75,9 @@ async function main() {
   const signalDateMin = signalDates[0];
   const signalDateMax = signalDates[signalDates.length - 1];
 
-  // 2) 営業日カレンダー: 全銘柄の蓄積が完了した日付(price_sync_dates)
-  const tradingDays = (await select(d1, "SELECT date FROM price_sync_dates WHERE date >= ? ORDER BY date", [signalDateMin])).map((r) => r.date);
+  // 2) 営業日カレンダー: 全銘柄の蓄積が完了した日付(price_sync_dates)。実現ボラティリティ(直近20営業日)のため、最初の基準日の約60日前から読む
+  const lookbackStart = addDays(signalDateMin, -60);
+  const tradingDays = (await select(d1, "SELECT date FROM price_sync_dates WHERE date >= ? ORDER BY date", [lookbackStart])).map((r) => r.date);
 
   // 3) 評価した銘柄の始値・終値(評価の基準日以降)
   const codes = [...new Set(evaluations.map((e) => e.code))];
@@ -82,7 +87,7 @@ async function main() {
     const rows = await select(
       d1,
       `SELECT code, date, open, close FROM stock_prices WHERE date >= ? AND code IN (${chunk.map(() => "?").join(",")})`,
-      [signalDateMin, ...chunk]
+      [lookbackStart, ...chunk]
     );
     for (const r of rows) {
       if (!pricesByCode.has(r.code)) pricesByCode.set(r.code, new Map());
@@ -104,7 +109,7 @@ async function main() {
   const results = {};
   for (const h of args.horizons) {
     results[h] = {
-      summary: summarizeBacktest(built[h].rows, { topN: args.topN, bands: args.bands }),
+      summary: summarizeBacktest(built[h].rows, { topN: args.topN, bands: args.bands, scoreCuts: args.scoreCuts }),
       skipped: built[h].skipped,
       delayedEntry: built[h].delayedEntry,
     };
@@ -121,6 +126,7 @@ async function main() {
     topN: args.topN,
     bands: args.bands,
     maxStaleDays: args.maxStaleDays,
+    scoreCuts: args.scoreCuts,
     d1: d1.stats,
   };
 
