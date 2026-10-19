@@ -5,7 +5,9 @@
 //   - 評価の基準日(data_as_of_date = 評価に使った最後の日足の日)の「翌営業日の始値」で買う。
 //     評価の生成時刻が、その翌営業日の寄り付き(日本時間9時 = UTC 0時)より後なら、さらに次の営業日の始値にずらす
 //     (寄り付きに間に合わない評価で、始値を使った成績を作らないため)。
-//   - 買った日を1日目として、N営業日目(N = 保有日数 horizon)の終値で売る。
+//   - 売る日と価格(exitAt):
+//       "open"(既定): 買った日からN営業日後の始値で売る(= N営業日保有。日中に取引できず、夜か朝に注文して寄り付きで約定する使い方に合わせる)。
+//       "close": 買った日を1日目として、N営業日目の終値で売る(比較用)。
 //   - 往復の手数料・価格差の合計を costPct(%)として差し引いた「コスト控除後」も計算する。
 // 注意:
 //   - 評価の基準日が、生成された日より maxStaleDays(既定5)日より前のものは、古い情報に基づく評価なので除外する
@@ -179,7 +181,9 @@ export function buildBacktestRows({
   horizons = DEFAULT_HORIZONS,
   costPct = 0,
   maxStaleDays = 5,
+  exitAt = "open",
 }) {
+  if (exitAt !== "open" && exitAt !== "close") throw new Error(`exitAt は "open" か "close" を指定してください: ${exitAt}`);
   const dayIndex = new Map(tradingDays.map((d, i) => [d, i]));
   const unique = dedupeEvaluations(evaluations);
   const result = {};
@@ -219,7 +223,7 @@ export function buildBacktestRows({
           delayed = true;
         }
       }
-      const exitIdx = entryIdx + h - 1;
+      const exitIdx = exitAt === "open" ? entryIdx + h : entryIdx + h - 1;
       if (exitIdx >= tradingDays.length) {
         bucket.skipped.notElapsed++;
         continue;
@@ -228,18 +232,18 @@ export function buildBacktestRows({
       const exitDate = tradingDays[exitIdx];
       const prices = pricesByCode.get(e.code);
       const entryOpen = toNumber(prices?.get(entryDate)?.open);
-      const exitClose = toNumber(prices?.get(exitDate)?.close);
-      if (!(entryOpen > 0) || !(exitClose > 0)) {
+      const exitPrice = toNumber(prices?.get(exitDate)?.[exitAt]);
+      if (!(entryOpen > 0) || !(exitPrice > 0)) {
         bucket.skipped.noPrice++;
         continue;
       }
 
-      const retPct = (exitClose / entryOpen - 1) * 100;
+      const retPct = (exitPrice / entryOpen - 1) * 100;
       const closeAtSignal = toNumber(prices?.get(e.data_as_of_date)?.close);
-      const refPct = closeAtSignal > 0 ? (exitClose / closeAtSignal - 1) * 100 : null; // 参考: 評価日の終値で買えた場合
+      const refPct = closeAtSignal > 0 ? (exitPrice / closeAtSignal - 1) * 100 : null; // 参考: 評価日の終値で買えた場合
       const topixOpen = toNumber(topixByDate.get(entryDate)?.open);
-      const topixClose = toNumber(topixByDate.get(exitDate)?.close);
-      const topixPct = topixOpen > 0 && topixClose > 0 ? (topixClose / topixOpen - 1) * 100 : null;
+      const topixExit = toNumber(topixByDate.get(exitDate)?.[exitAt]);
+      const topixPct = topixOpen > 0 && topixExit > 0 ? (topixExit / topixOpen - 1) * 100 : null;
 
       if (delayed) bucket.delayedEntry++;
       bucket.rows.push({
@@ -247,6 +251,7 @@ export function buildBacktestRows({
         signalDate: e.data_as_of_date,
         entryDate,
         exitDate,
+        exitAt,
         horizon: h,
         score,
         rating: e.rating ?? null,
@@ -556,7 +561,11 @@ export function formatBacktestReport({ meta, results }) {
   lines.push("# AI評価のバックテスト(D1の実データ。読み取りのみ)");
   lines.push("");
   lines.push(`- 評価: ${meta.evaluationsUnique}件(重複除去前 ${meta.evaluationsRaw}件)、基準日 ${meta.signalDateMin}〜${meta.signalDateMax}`);
-  lines.push("- 約定の仮定: 基準日の翌営業日の始値で買い、保有日数目の終値で売る(寄り付きに間に合わない評価は、次の営業日の始値)");
+  lines.push(
+    meta.exitAt === "close"
+      ? "- 約定の仮定: 基準日の翌営業日の始値で買い、買った日を1日目として保有日数目の終値で売る(寄り付きに間に合わない評価は、次の営業日の始値)"
+      : "- 約定の仮定: 基準日の翌営業日の始値で買い、保有日数(営業日)後の始値で売る(寄り付きに間に合わない評価は、次の営業日の始値。日中に取引できず、夜か朝に注文して寄り付きで約定する使い方)"
+  );
   lines.push(`- 往復コスト: ${meta.costPct}%(コスト控除後の成績で集計) / 上位N: ${meta.topN} / スコア帯: ${meta.bands}`);
   if (meta.scoreCuts) lines.push(`- スコアの区切り(固定): ${meta.scoreCuts.join(", ")}`);
   if (meta.maxStaleDays !== undefined && meta.maxStaleDays !== null) {

@@ -24,6 +24,14 @@ on:
         description: "評価の基準日が、生成された日よりこの日数より前のものは除外する(省略時は5)"
         required: false
         default: ""
+      exitAt:
+        description: "売る価格。open = 保有日数後の始値(既定。日中に取引できない使い方に合わせる) / close = 保有日数目の終値(比較用)"
+        required: false
+        type: choice
+        default: "open"
+        options:
+          - "open"
+          - "close"
       scoreCuts:
         description: "スコアの水準を分ける区切りをカンマ区切りで指定(省略時は 62,68,72。最上位の水準 − それ以外も出る)"
         required: false
@@ -53,6 +61,7 @@ jobs:
           BACKTEST_TOP: ${{ inputs.top }}
           BACKTEST_MAX_STALE_DAYS: ${{ inputs.maxStaleDays }}
           BACKTEST_SCORE_CUTS: ${{ inputs.scoreCuts }}
+          BACKTEST_EXIT_AT: ${{ inputs.exitAt }}
         run: node scripts/backtest-d1.js
 
       - name: 結果(data/)をartifactとしてアップロード

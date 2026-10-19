@@ -42,7 +42,7 @@ function baseData() {
 
 test("翌営業日の始値で買い、保有日数目の終値で売る。コスト控除後も出る", () => {
   const { pricesByCode, evaluations } = baseData();
-  const out = buildBacktestRows({ evaluations, pricesByCode, tradingDays: DAYS, horizons: [1, 3], costPct: 0.2 });
+  const out = buildBacktestRows({ exitAt: "close", evaluations, pricesByCode, tradingDays: DAYS, horizons: [1, 3], costPct: 0.2 });
   const h1 = Object.fromEntries(out[1].rows.map((r) => [r.code, r]));
   assert.equal(h1.A.entryDate, "2026-10-02");
   assert.equal(h1.A.exitDate, "2026-10-02"); // 保有1営業日 = 買った日の終値で売る
@@ -62,7 +62,7 @@ test("寄り付きに間に合わない評価は、買う日を次の営業日�
   const { pricesByCode, evaluations } = baseData();
   // 10/2 03:00 UTC(= 12:00 JST)に生成 → 10/2の始値はもう過ぎている → 10/5の始値で買う
   const late = evaluations.map((e) => ({ ...e, generated_at: "2026-10-02T03:00:00.000Z" }));
-  const out = buildBacktestRows({ evaluations: late, pricesByCode, tradingDays: DAYS, horizons: [1] });
+  const out = buildBacktestRows({ exitAt: "close", evaluations: late, pricesByCode, tradingDays: DAYS, horizons: [1] });
   const a = out[1].rows.find((r) => r.code === "A");
   assert.equal(a.entryDate, "2026-10-05");
   assert.equal(a.exitDate, "2026-10-05");
@@ -79,7 +79,7 @@ test("保有日数が経過していない評価・株価の無い評価・カ�
     { code: "A", data_as_of_date: "2026-10-07", generated_at: "2026-10-07T08:00:00.000Z", score: 70, rating: "BUY" }, // 買う日(10/8)はあるが、5営業日後は無い
     { code: "A", data_as_of_date: "2026-10-05", generated_at: "2026-10-05T08:00:00.000Z", score: null, rating: "BUY" }, // スコアなし
   ];
-  const out = buildBacktestRows({ evaluations: more, pricesByCode, tradingDays: DAYS, horizons: [1, 5] });
+  const out = buildBacktestRows({ exitAt: "close", evaluations: more, pricesByCode, tradingDays: DAYS, horizons: [1, 5] });
   assert.equal(out[1].rows.length, 3);
   assert.equal(out[1].skipped.noPrice, 2); // 銘柄D(株価なし)と、銘柄Aの10/8(株価なし)
   assert.equal(out[1].skipped.noCalendar, 1);
@@ -97,22 +97,22 @@ test("基準日が生成された日より何日も前の評価(約3か月前の
     // 基準日10/1だが、20日後に生成された評価(有料プラン移行前の、遅延したデータに基づく評価に相当)
     { code: "A", data_as_of_date: "2026-10-01", generated_at: "2026-10-21T08:00:00.000Z", score: 99, rating: "BUY" },
   ];
-  const out = buildBacktestRows({ evaluations: stale, pricesByCode, tradingDays: DAYS, horizons: [1] });
+  const out = buildBacktestRows({ exitAt: "close", evaluations: stale, pricesByCode, tradingDays: DAYS, horizons: [1] });
   // 同じ(銘柄, 基準日)の評価は、最も早い1件(通常の評価)が使われるので、古い評価は重複として落ちる
   assert.equal(out[1].rows.length, 3);
   assert.equal(out[1].skipped.staleBasis, 0);
   // 古い評価だけがある場合は、除外されて数えられる
   const onlyStale = [{ code: "A", data_as_of_date: "2026-10-01", generated_at: "2026-10-21T08:00:00.000Z", score: 99, rating: "BUY" }];
-  const out2 = buildBacktestRows({ evaluations: onlyStale, pricesByCode, tradingDays: DAYS, horizons: [1] });
+  const out2 = buildBacktestRows({ exitAt: "close", evaluations: onlyStale, pricesByCode, tradingDays: DAYS, horizons: [1] });
   assert.equal(out2[1].rows.length, 0);
   assert.equal(out2[1].skipped.staleBasis, 1);
   // 判定を無効にすれば(null)、除外されない(この例では買う日がカレンダーの外になり「未経過」になる)
-  const off = buildBacktestRows({ evaluations: onlyStale, pricesByCode, tradingDays: DAYS, horizons: [1], maxStaleDays: null });
+  const off = buildBacktestRows({ exitAt: "close", evaluations: onlyStale, pricesByCode, tradingDays: DAYS, horizons: [1], maxStaleDays: null });
   assert.equal(off[1].skipped.staleBasis, 0);
   assert.equal(off[1].skipped.notElapsed, 1);
   // 通常の遅れ(週末をはさんだ3日)は除外されない
   const weekend = [{ code: "A", data_as_of_date: "2026-10-02", generated_at: "2026-10-05T00:30:00.000Z", score: 70, rating: "BUY" }];
-  const out3 = buildBacktestRows({ evaluations: weekend, pricesByCode, tradingDays: DAYS, horizons: [1] });
+  const out3 = buildBacktestRows({ exitAt: "close", evaluations: weekend, pricesByCode, tradingDays: DAYS, horizons: [1] });
   assert.equal(out3[1].skipped.staleBasis, 0);
 });
 
@@ -134,13 +134,13 @@ test("TOPIXとの差: 買う日の始値から売る日の終値までのTOPIX�
     ["2026-10-02", { open: 2000, close: 2010 }],
     ["2026-10-06", { open: 2030, close: 2040 }],
   ]);
-  const out = buildBacktestRows({ evaluations, pricesByCode, tradingDays: DAYS, topixByDate, horizons: [3], costPct: 0 });
+  const out = buildBacktestRows({ exitAt: "close", evaluations, pricesByCode, tradingDays: DAYS, topixByDate, horizons: [3], costPct: 0 });
   const a = out[3].rows.find((r) => r.code === "A");
   const topixPct = (2040 / 2000 - 1) * 100; // 10/2始値 → 10/6終値
   assert.ok(Math.abs(a.topixPct - topixPct) < 1e-9);
   assert.ok(Math.abs(a.excessPct - (20 - topixPct)) < 1e-9);
   // TOPIXが無ければ、差はnull(集計から外れる)
-  const noTopix = buildBacktestRows({ evaluations, pricesByCode, tradingDays: DAYS, horizons: [3] });
+  const noTopix = buildBacktestRows({ exitAt: "close", evaluations, pricesByCode, tradingDays: DAYS, horizons: [3] });
   assert.equal(noTopix[3].rows[0].excessPct, null);
 });
 
@@ -215,7 +215,7 @@ test("集計: 件数がNに満たない日は上位Nの比較から外し、10�
 
 test("レポート: 注意書き・各保有日数の見出し・表が出る", () => {
   const { pricesByCode, evaluations } = baseData();
-  const built = buildBacktestRows({ evaluations, pricesByCode, tradingDays: DAYS, horizons: [1, 3] });
+  const built = buildBacktestRows({ exitAt: "close", evaluations, pricesByCode, tradingDays: DAYS, horizons: [1, 3] });
   const results = {};
   for (const h of [1, 3]) results[h] = { summary: summarizeBacktest(built[h].rows, { topN: 2, bands: 3 }), skipped: built[h].skipped, delayedEntry: built[h].delayedEntry };
   const report = formatBacktestReport({
@@ -351,14 +351,14 @@ test("指標別の順位相関: 上昇確率は成績と同じ向き(+1)、下�
 test("行の指標・ボラティリティ: 評価の上昇確率などと、基準日までの実現ボラティリティが行に入る", () => {
   const { pricesByCode, evaluations } = baseData();
   const withMetrics = evaluations.map((e) => ({ ...e, upside_probability: 0.6, downside_risk: 20, expected_return: 3, confidence: 0.7 }));
-  const out = buildBacktestRows({ evaluations: withMetrics, pricesByCode, tradingDays: DAYS, horizons: [1] });
+  const out = buildBacktestRows({ exitAt: "close", evaluations: withMetrics, pricesByCode, tradingDays: DAYS, horizons: [1] });
   const a = out[1].rows.find((r) => r.code === "A");
   assert.equal(a.upsideProb, 0.6);
   assert.equal(a.downsideRisk, 20);
   assert.equal(a.expectedReturn, 3);
   assert.equal(a.confidence, 0.7);
   assert.equal(a.vol20, null); // 基準日までの履歴が1日しか無く、ボラティリティは計算できない
-  const none = buildBacktestRows({ evaluations, pricesByCode, tradingDays: DAYS, horizons: [1] });
+  const none = buildBacktestRows({ exitAt: "close", evaluations, pricesByCode, tradingDays: DAYS, horizons: [1] });
   assert.equal(none[1].rows[0].upsideProb, null); // 指標が無い評価はnull
 });
 
@@ -380,6 +380,60 @@ test("レポート(拡張): 固定のスコア帯・同点・外れ値・値動�
   assert.match(report, /指標ごとの、成績との順位相関/);
   assert.match(report, /上昇確率\(upside_probability\)/);
   assert.match(report, /スコアの区切り\(固定\): 62, 68, 72/);
+});
+
+test("売る価格(既定は始値): 買った日からN営業日後の始値で売る。終値の仮定(close)も選べる", () => {
+  const { pricesByCode, evaluations } = baseData();
+  // 既定(open): 10/2の始値で買い、1営業日後(10/5)・2営業日後(10/6)の始値で売る
+  const open = buildBacktestRows({ evaluations, pricesByCode, tradingDays: DAYS, horizons: [1, 2] });
+  const a1 = open[1].rows.find((r) => r.code === "A");
+  assert.equal(a1.entryDate, "2026-10-02");
+  assert.equal(a1.exitDate, "2026-10-05");
+  assert.equal(a1.exitAt, "open");
+  assert.ok(Math.abs(a1.retPct - 10) < 1e-9); // 100 → 10/5の始値110
+  const c1 = open[1].rows.find((r) => r.code === "C");
+  assert.ok(Math.abs(c1.retPct - -10) < 1e-9); // 100 → 10/5の始値90
+  const a2 = open[2].rows.find((r) => r.code === "A");
+  assert.equal(a2.exitDate, "2026-10-06");
+  assert.ok(Math.abs(a2.retPct - 15) < 1e-9); // 100 → 10/6の始値115
+  const c2 = open[2].rows.find((r) => r.code === "C");
+  assert.ok(Math.abs(c2.retPct - -15) < 1e-9); // 100 → 10/6の始値85
+  // 比較: 終値(close)の仮定では、買った日を1日目として、その日の終値で売る(A: 100 → 10/2の終値110)
+  const close = buildBacktestRows({ exitAt: "close", evaluations, pricesByCode, tradingDays: DAYS, horizons: [1] });
+  const aClose = close[1].rows.find((r) => r.code === "A");
+  assert.equal(aClose.exitDate, "2026-10-02");
+  assert.equal(aClose.exitAt, "close");
+  assert.throws(() => buildBacktestRows({ exitAt: "vwap", evaluations, pricesByCode, tradingDays: DAYS, horizons: [1] }), /exitAt/);
+});
+
+test("売る価格が始値のときは、売る日が1日遅くなるぶん、保有日数が経過していない評価が増える。TOPIXも始値どうしで比べる", () => {
+  const { pricesByCode, evaluations } = baseData();
+  // 5営業日: 買う日10/2の5営業日後は、カレンダー(〜10/8)の外 → 未経過(終値の仮定なら10/8まで届くが株価が無い)
+  const open5 = buildBacktestRows({ evaluations, pricesByCode, tradingDays: DAYS, horizons: [5] });
+  assert.equal(open5[5].rows.length, 0);
+  assert.equal(open5[5].skipped.notElapsed, 3);
+  const close5 = buildBacktestRows({ exitAt: "close", evaluations, pricesByCode, tradingDays: DAYS, horizons: [5] });
+  assert.equal(close5[5].skipped.notElapsed, 0);
+  assert.equal(close5[5].skipped.noPrice, 3);
+  // TOPIX: 10/2の始値2000 → 10/5の始値2020 は +1%(終値ではなく始値どうし)
+  const topixByDate = new Map([
+    ["2026-10-02", { open: 2000, close: 2010 }],
+    ["2026-10-05", { open: 2020, close: 2100 }],
+  ]);
+  const out = buildBacktestRows({ evaluations, pricesByCode, tradingDays: DAYS, topixByDate, horizons: [1] });
+  const a = out[1].rows.find((r) => r.code === "A");
+  assert.ok(Math.abs(a.topixPct - 1) < 1e-9);
+  assert.ok(Math.abs(a.excessPct - 9) < 1e-9); // +10% − 1%
+});
+
+test("レポート: 売る価格の仮定(始値 / 終値)が書かれる", () => {
+  const mk = (exitAt) =>
+    formatBacktestReport({
+      meta: { evaluationsUnique: 0, evaluationsRaw: 0, signalDateMin: "2026-10-01", signalDateMax: "2026-10-01", costPct: 0, topN: 5, bands: 3, exitAt },
+      results: {},
+    });
+  assert.match(mk("open"), /保有日数\(営業日\)後の始値で売る/);
+  assert.match(mk("close"), /保有日数目の終値で売る/);
 });
 
 test("バックテストのスクリプトは、D1に対してSELECTしか実行しない(書き込みの呼び出しを持たない)", () => {
