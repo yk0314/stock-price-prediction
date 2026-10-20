@@ -32,6 +32,10 @@ on:
         options:
           - "open"
           - "close"
+      holdoutFrom:
+        description: "確認期間の開始日(基準日がこの日以降の評価だけで、事前に固定した選び方を確認する。省略時は 2026-10-19)"
+        required: false
+        default: ""
       scoreCuts:
         description: "スコアの水準を分ける区切りをカンマ区切りで指定(省略時は 62,68,72。最上位の水準 − それ以外も出る)"
         required: false
@@ -62,6 +66,7 @@ jobs:
           BACKTEST_MAX_STALE_DAYS: ${{ inputs.maxStaleDays }}
           BACKTEST_SCORE_CUTS: ${{ inputs.scoreCuts }}
           BACKTEST_EXIT_AT: ${{ inputs.exitAt }}
+          BACKTEST_HOLDOUT_FROM: ${{ inputs.holdoutFrom }}
         run: node scripts/backtest-d1.js
 
       - name: 結果(data/)をartifactとしてアップロード

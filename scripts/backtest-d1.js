@@ -3,8 +3,8 @@
 //
 // 使い方:
 //   必要な環境変数: CF_ACCOUNT_ID, CF_D1_DATABASE_ID, CF_API_TOKEN(D1の読み取りだけを行う)
-//   node scripts/backtest-d1.js [--from 2026-10-05] [--horizons 1,3,5] [--cost-pct 0.3] [--top 10] [--bands 3] [--max-stale-days 5] [--score-cuts 62,68,72] [--exit-at open|close]
-//   (環境変数 BACKTEST_FROM / BACKTEST_HORIZONS / BACKTEST_COST_PCT / BACKTEST_TOP / BACKTEST_BANDS / BACKTEST_MAX_STALE_DAYS / BACKTEST_SCORE_CUTS / BACKTEST_EXIT_AT でも指定できる。引数が優先)
+//   node scripts/backtest-d1.js [--from 2026-10-05] [--horizons 1,3,5] [--cost-pct 0.3] [--top 10] [--bands 3] [--max-stale-days 5] [--score-cuts 62,68,72] [--exit-at open|close] [--holdout-from 2026-10-19]
+//   (環境変数 BACKTEST_FROM / BACKTEST_HORIZONS / BACKTEST_COST_PCT / BACKTEST_TOP / BACKTEST_BANDS / BACKTEST_MAX_STALE_DAYS / BACKTEST_SCORE_CUTS / BACKTEST_EXIT_AT / BACKTEST_HOLDOUT_FROM でも指定できる。引数が優先)
 //
 // D1には SELECT しか実行しない(書き込み・マイグレーションは一切しない)。
 import { appendFile } from "node:fs/promises";
@@ -12,7 +12,7 @@ import { config } from "../src/config.js";
 import { D1Client } from "../src/d1.js";
 import { writeArtifact } from "../src/artifacts.js";
 import { addDays } from "../src/tradingCalendar.js";
-import { DEFAULT_HORIZONS, buildBacktestRows, formatBacktestReport, summarizeBacktest } from "../src/backtestD1.js";
+import { DEFAULT_HORIZONS, RULES_FIXED_ON, buildBacktestRows, evaluateRules, formatBacktestReport, summarizeBacktest } from "../src/backtestD1.js";
 
 const CODE_CHUNK = 90; // D1のバインド変数は1文につき100個まで(日付の1個を足しても超えない)
 
@@ -30,6 +30,7 @@ function parseArgs(argv, env) {
   const staleRaw = String(get("max-stale-days", "BACKTEST_MAX_STALE_DAYS")).trim();
   const cutsRaw = String(get("score-cuts", "BACKTEST_SCORE_CUTS")).trim();
   const exitRaw = String(get("exit-at", "BACKTEST_EXIT_AT")).trim();
+  const holdoutRaw = String(get("holdout-from", "BACKTEST_HOLDOUT_FROM")).trim();
 
   if (fromRaw && !/^\d{4}-\d{2}-\d{2}$/.test(fromRaw)) throw new Error(`--from は YYYY-MM-DD 形式で指定してください: ${fromRaw}`);
   const horizons = horizonsRaw ? horizonsRaw.split(",").map((s) => Number(s.trim())) : DEFAULT_HORIZONS;
@@ -46,7 +47,8 @@ function parseArgs(argv, env) {
   if (scoreCuts.length > 6 || scoreCuts.some((c) => !Number.isFinite(c) || c < 0 || c > 100)) throw new Error(`--score-cuts は0〜100の数値を6個までカンマ区切りで指定してください: ${cutsRaw}`);
   const exitAt = exitRaw || "open";
   if (exitAt !== "open" && exitAt !== "close") throw new Error(`--exit-at は open か close を指定してください: ${exitRaw}`);
-  return { exitAt, from: fromRaw || null, horizons: [...new Set(horizons)].sort((a, b) => a - b), costPct, topN, bands, maxStaleDays, scoreCuts: [...new Set(scoreCuts)].sort((a, b) => a - b) };
+  if (holdoutRaw && !/^\d{4}-\d{2}-\d{2}$/.test(holdoutRaw)) throw new Error(`--holdout-from は YYYY-MM-DD 形式で指定してください: ${holdoutRaw}`);
+  return { holdoutFrom: holdoutRaw || RULES_FIXED_ON, exitAt, from: fromRaw || null, horizons: [...new Set(horizons)].sort((a, b) => a - b), costPct, topN, bands, maxStaleDays, scoreCuts: [...new Set(scoreCuts)].sort((a, b) => a - b) };
 }
 
 /** 読み取り専用の問い合わせ。SELECT以外は実行しない。 */
@@ -62,7 +64,7 @@ async function main() {
     databaseId: process.env.CF_D1_DATABASE_ID,
     apiToken: process.env.CF_API_TOKEN,
   });
-  console.log(`[backtest-d1] 開始: horizons=${args.horizons.join(",")} / costPct=${args.costPct} / top=${args.topN} / bands=${args.bands} / maxStaleDays=${args.maxStaleDays} / scoreCuts=${args.scoreCuts.join(",")} / exitAt=${args.exitAt} / from=${args.from ?? "(最初の評価から)"}`);
+  console.log(`[backtest-d1] 開始: horizons=${args.horizons.join(",")} / costPct=${args.costPct} / top=${args.topN} / bands=${args.bands} / maxStaleDays=${args.maxStaleDays} / scoreCuts=${args.scoreCuts.join(",")} / exitAt=${args.exitAt} / holdoutFrom=${args.holdoutFrom} / from=${args.from ?? "(最初の評価から)"}`);
 
   // 1) AI評価(新規候補のpipeline由来だけ。保有銘柄の再評価は、選び方が違うので含めない)
   const evaluations = await select(
@@ -113,6 +115,7 @@ async function main() {
   for (const h of args.horizons) {
     results[h] = {
       summary: summarizeBacktest(built[h].rows, { topN: args.topN, bands: args.bands, scoreCuts: args.scoreCuts }),
+      rules: evaluateRules(built[h].rows, { holdoutFrom: args.holdoutFrom }),
       skipped: built[h].skipped,
       delayedEntry: built[h].delayedEntry,
     };
@@ -131,6 +134,7 @@ async function main() {
     maxStaleDays: args.maxStaleDays,
     scoreCuts: args.scoreCuts,
     exitAt: args.exitAt,
+    holdoutFrom: args.holdoutFrom,
     d1: d1.stats,
   };
 

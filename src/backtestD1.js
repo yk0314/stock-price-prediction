@@ -551,6 +551,149 @@ export function summarizeBacktest(
   };
 }
 
+// ---- 事前に固定した選び方(規則)の評価 -------------------------------------------------------------
+// 規則は RULES_FIXED_ON の日に固定した。A・B・Cは、探索期間(固定日より前の基準日)の結果を見て作った規則なので、
+// 探索期間の数字は参考値にとどめ、確認は固定日以降の基準日の評価(確認期間)だけで行う。
+// 規則を変えたときは、固定日も新しい日付に更新する(確認期間をやり直すため)。
+export const RULES_FIXED_ON = "2026-10-19";
+export const RULE_TOP_N = 10;
+
+const riskKey = (r) => (Number.isFinite(r.downsideRisk) ? r.downsideRisk : Infinity);
+
+/** スコア上位N件。同点は無作為な並びのまま(安定ソート)。useRiskなら、同点は下落リスクが低い順(下落リスクが無い銘柄は最後)。 */
+function pickTop(list, random, n, useRisk) {
+  const shuffled = sample(list, list.length, random);
+  shuffled.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (!useRisk) return 0;
+    const ra = riskKey(a);
+    const rb = riskKey(b);
+    return ra < rb ? -1 : ra > rb ? 1 : 0;
+  });
+  return shuffled.slice(0, n);
+}
+
+export const RULES = [
+  { key: "0", label: "0(基準): スコア上位10件(同点は無作為)", randomized: true, select: (list, random) => pickTop(list, random, RULE_TOP_N, false) },
+  { key: "A", label: "A: スコア72以上", randomized: false, select: (list) => list.filter((r) => r.score >= 72) },
+  {
+    key: "B",
+    label: "B: スコア72以上、かつ下落リスクがその日の中央値より低い",
+    randomized: false,
+    select: (list) => {
+      const risks = list.map((r) => r.downsideRisk).filter((x) => Number.isFinite(x));
+      if (risks.length < 3) return [];
+      const med = median(risks);
+      return list.filter((r) => r.score >= 72 && Number.isFinite(r.downsideRisk) && r.downsideRisk < med);
+    },
+  },
+  { key: "C", label: "C: スコア上位10件(同点は下落リスクが低い順)", randomized: true, select: (list, random) => pickTop(list, random, RULE_TOP_N, true) },
+];
+
+function evaluateRuleDays(rule, dayList, { minPicks, simulations, random }) {
+  const days = [];
+  const values = [];
+  const excess = [];
+  let wins = 0;
+  let picksTotal = 0;
+  for (const [signalDate, list] of dayList) {
+    const poolMean = mean(list.map((r) => r.netPct));
+    const poolMedian = median(list.map((r) => r.netPct));
+    const reps = rule.randomized ? simulations : 1;
+    let sumMean = 0;
+    let sumMedian = 0;
+    let k = 0;
+    for (let i = 0; i < reps; i++) {
+      const picks = rule.select(list, random);
+      if (picks.length < minPicks) {
+        k = picks.length;
+        sumMean = NaN;
+        break;
+      }
+      k = picks.length;
+      sumMean += mean(picks.map((r) => r.netPct));
+      sumMedian += median(picks.map((r) => r.netPct));
+      for (const r of picks) {
+        values.push(r.netPct);
+        picksTotal++;
+        if (r.netPct > 0) wins++;
+        if (r.excessPct !== null) excess.push(r.excessPct - (r.retPct - r.netPct));
+      }
+    }
+    if (Number.isNaN(sumMean)) {
+      // 選ばれた件数が少ない日は集計から外す
+      days.push({ signalDate, n: list.length, picks: k, used: false });
+      continue;
+    }
+    days.push({ signalDate, n: list.length, picks: k, used: true, pickedMean: sumMean / reps, diff: sumMean / reps - poolMean, diffMedian: sumMedian / reps - poolMedian, list, poolMean });
+  }
+  return { days, values, excess, wins, picksTotal };
+}
+
+/**
+ * 事前に固定した選び方(RULES)を、探索期間(基準日が holdoutFrom より前)と確認期間(holdoutFrom 以降)に分けて評価する。
+ * 各規則の「選んだ銘柄の平均 − その日の評価全件の平均」を日ごとに求め、日を単位にした信頼区間・正の日の数・
+ * 同じ件数を無作為に選んだ場合の分布(p値)を出す。選んだ件数がminPicks未満の日は、その規則の集計から外す。
+ */
+export function evaluateRules(rows, { holdoutFrom = RULES_FIXED_ON, minPicks = 3, simulations = 100, randomPicks = 1000, iterations = 2000, seed = 777 } = {}) {
+  const byDay = new Map();
+  for (const r of rows) {
+    if (!byDay.has(r.signalDate)) byDay.set(r.signalDate, []);
+    byDay.get(r.signalDate).push(r);
+  }
+  const dayList = [...byDay.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  const periods = {
+    inSample: dayList.filter(([d]) => d < holdoutFrom),
+    holdout: dayList.filter(([d]) => d >= holdoutFrom),
+  };
+  const out = { holdoutFrom, fixedOn: RULES_FIXED_ON, periods: {} };
+  for (const [periodKey, days] of Object.entries(periods)) {
+    const random = mulberry32(seed);
+    const result = { days: days.length, rules: [] };
+    for (const rule of RULES) {
+      if (days.length === 0) {
+        result.rules.push({ key: rule.key, label: rule.label, days: 0 });
+        continue;
+      }
+      const ev = evaluateRuleDays(rule, days, { minPicks, simulations, random });
+      const used = ev.days.filter((d) => d.used);
+      const diffs = used.map((d) => d.diff);
+      let randomPick = null;
+      if (used.length > 0) {
+        const means = [];
+        for (let i = 0; i < randomPicks; i++) {
+          let sum = 0;
+          for (const d of used) sum += mean(sample(d.list, d.picks, random).map((r) => r.netPct)) - d.poolMean;
+          means.push(sum / used.length);
+        }
+        means.sort((a, b) => a - b);
+        const observed = mean(diffs);
+        randomPick = {
+          lo: means[Math.floor(0.025 * (means.length - 1))],
+          hi: means[Math.floor(0.975 * (means.length - 1))],
+          p: means.filter((m) => m >= observed).length / means.length,
+        };
+      }
+      result.rules.push({
+        key: rule.key,
+        label: rule.label,
+        days: used.length,
+        skippedDays: ev.days.length - used.length,
+        picksPerDay: mean(used.map((d) => d.picks)),
+        pickedMean: mean(ev.values),
+        pickedMedian: median(ev.values),
+        pickedWinRate: ev.picksTotal === 0 ? null : ev.wins / ev.picksTotal,
+        pickedExcess: mean(ev.excess),
+        diff: used.length === 0 ? null : { mean: mean(diffs), ci: bootstrapMeanCI(diffs, { iterations, seed }), positiveDays: positiveDays(diffs) },
+        diffMedian: used.length === 0 ? null : { mean: mean(used.map((d) => d.diffMedian)), positiveDays: positiveDays(used.map((d) => d.diffMedian)) },
+        randomPick,
+      });
+    }
+    out.periods[periodKey] = result;
+  }
+  return out;
+}
+
 const f2 = (v) => (v === null || v === undefined || !Number.isFinite(v) ? "—" : v.toFixed(2));
 const pct1 = (v) => (v === null || v === undefined || !Number.isFinite(v) ? "—" : `${(v * 100).toFixed(1)}%`);
 const ci = (c) => (c ? `[${f2(c.lo)}, ${f2(c.hi)}]` : "—(日数が足りない)");
@@ -663,6 +806,35 @@ export function formatBacktestReport({ meta, results }) {
     lines.push("|---|---|---|---|---|");
     for (const m of summary.byMetric) {
       lines.push(`| ${m.label} | ${m.days} | ${f2(m.mean)} | ${ci(m.ci)} | ${m.positiveDays} |`);
+    }
+    if (results[h].rules) {
+      const rl = results[h].rules;
+      lines.push("");
+      lines.push(`**事前に固定した選び方の評価(規則は ${rl.fixedOn} に固定。確認は、基準日が ${rl.holdoutFrom} 以降の評価だけで行う)**`);
+      lines.push("");
+      lines.push("規則B・Cは、探索期間の結果を見て作ったものです。探索期間の数字は参考値で、確認期間の結果だけが、規則の良し悪しの判断材料になります。");
+      for (const [periodKey, title] of [["inSample", `探索期間(基準日が ${rl.holdoutFrom} より前。参考値)`], ["holdout", `確認期間(基準日が ${rl.holdoutFrom} 以降)`]]) {
+        const period = rl.periods[periodKey];
+        lines.push("");
+        lines.push(`*${title}: ${period.days}日分*`);
+        if (period.days === 0) {
+          lines.push("");
+          lines.push("まだ評価がありません(保有日数分の営業日が経過した評価から、入ります)。");
+          continue;
+        }
+        lines.push("");
+        lines.push("| 規則 | 日数 | 1日の選択数 | 選んだ銘柄の平均(%) | 中央値(%) | 勝率 | 全件平均との差(%) | 95%信頼区間 | 正の日 | 差(中央値) | 無作為に同数を選ぶ場合の95%範囲 / p | TOPIXとの差(%) |");
+        lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|");
+        for (const r of period.rules) {
+          if (!r.days) {
+            lines.push(`| ${r.label} | ${r.days ?? 0} | — | — | — | — | — | — | — | — | — | — |`);
+            continue;
+          }
+          lines.push(
+            `| ${r.label} | ${r.days} | ${f2(r.picksPerDay)} | ${f2(r.pickedMean)} | ${f2(r.pickedMedian)} | ${pct1(r.pickedWinRate)} | ${f2(r.diff.mean)} | ${ci(r.diff.ci)} | ${r.diff.positiveDays}/${r.days} | ${f2(r.diffMedian.mean)} | [${f2(r.randomPick.lo)}, ${f2(r.randomPick.hi)}] / ${r.randomPick.p.toFixed(3)} | ${f2(r.pickedExcess)} |`
+          );
+        }
+      }
     }
     lines.push("");
     lines.push(`参考: スコアと、直近20日の実現ボラティリティの順位相関(日ごとの平均): ${f2(summary.scoreVolCorr.mean)}(日数 ${summary.scoreVolCorr.days} / ボラティリティを計算できた評価 ${pct1(summary.volCoverage)})。正に大きいほど、スコアが高い銘柄は値動きが大きい傾向を表します。`);

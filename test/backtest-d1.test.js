@@ -5,7 +5,10 @@ import { readFileSync } from "node:fs";
 import {
   bootstrapMeanCI,
   buildBacktestRows,
+  RULES,
+  RULES_FIXED_ON,
   dedupeEvaluations,
+  evaluateRules,
   formatBacktestReport,
   mean,
   median,
@@ -434,6 +437,92 @@ test("レポート: 売る価格の仮定(始値 / 終値)が書かれる", () =
     });
   assert.match(mk("open"), /保有日数\(営業日\)後の始値で売る/);
   assert.match(mk("close"), /保有日数目の終値で売る/);
+});
+
+// ---- 事前に固定した選び方(規則A・B・C・基準) ----
+function ruleDay(day) {
+  const rows = [];
+  // 75点の5件: 下落リスクと成績
+  [[10, 3], [12, 3], [14, 3], [40, -1], [50, -1]].forEach(([risk, net], i) => rows.push(mkRow(day, i, { score: 75, net, down: risk })));
+  // 68点の15件: 下落リスクは20〜34。下落リスクが低い5件(20〜24)だけ成績が+1
+  for (let i = 0; i < 15; i++) rows.push(mkRow(day, 10 + i, { score: 68, net: i < 5 ? 1 : 0, down: 20 + i }));
+  return rows;
+}
+
+test("規則A・B・Cと基準: 選び方どおりの銘柄が選ばれ、全件平均との差が期待どおりになる", () => {
+  const rows = [...ruleDay("2026-10-01"), ...ruleDay("2026-10-02"), ...ruleDay("2026-10-05")];
+  const out = evaluateRules(rows, { holdoutFrom: "2026-10-01", simulations: 100, randomPicks: 200, iterations: 200 });
+  assert.equal(out.fixedOn, RULES_FIXED_ON);
+  const hold = out.periods.holdout;
+  assert.equal(hold.days, 3);
+  const by = Object.fromEntries(hold.rules.map((r) => [r.key, r]));
+  // 全件平均 = (3+3+3-1-1 + 5)/20 = 0.6
+  // A: 75点の5件(平均 1.4) → 差 0.8
+  assert.equal(by.A.picksPerDay, 5);
+  assert.ok(Math.abs(by.A.pickedMean - 1.4) < 1e-9);
+  assert.ok(Math.abs(by.A.diff.mean - 0.8) < 1e-9);
+  // B: 75点かつ下落リスクが中央値(26.5)より低い3件(下落リスク10・12・14。成績+3) → 差 2.4
+  assert.equal(by.B.picksPerDay, 3);
+  assert.ok(Math.abs(by.B.diff.mean - 2.4) < 1e-9);
+  // C: 上位10件 = 75点の5件 + 同点(68点)の中で下落リスクが低い5件(成績+1) → 平均1.2、差 0.6(同点が決まるので、毎回同じ)
+  assert.equal(by.C.picksPerDay, 10);
+  assert.ok(Math.abs(by.C.diff.mean - 0.6) < 1e-9);
+  // 基準(0): 同点の5件を無作為に選ぶ → 期待値 (7 + 5 × 5/15) / 10 − 0.6 = 0.2667
+  assert.ok(Math.abs(by["0"].diff.mean - 0.26667) < 0.08, `0: ${by["0"].diff.mean}`);
+  // 無作為に同数を選ぶ場合の範囲とp値が出る
+  for (const r of hold.rules) {
+    assert.ok(r.randomPick.lo <= r.randomPick.hi);
+    assert.ok(r.randomPick.p >= 0 && r.randomPick.p <= 1);
+  }
+  assert.equal(by.B.diff.positiveDays, 3);
+  assert.equal(RULES.length, 4);
+});
+
+test("規則の評価: 探索期間(固定日より前)と確認期間(固定日以降)を分ける。確認期間の評価が無ければ日数0", () => {
+  const rows = [...ruleDay("2026-09-30"), ...ruleDay("2026-10-01"), ...ruleDay("2026-10-02")];
+  const out = evaluateRules(rows, { holdoutFrom: "2026-10-01", simulations: 20, randomPicks: 50, iterations: 100 });
+  assert.equal(out.periods.inSample.days, 1);
+  assert.equal(out.periods.holdout.days, 2);
+  const none = evaluateRules(ruleDay("2026-09-30"), { holdoutFrom: "2026-10-19", simulations: 20, randomPicks: 50, iterations: 100 });
+  assert.equal(none.periods.holdout.days, 0);
+  assert.ok(none.periods.holdout.rules.every((r) => r.days === 0));
+  assert.equal(none.periods.inSample.days, 1);
+});
+
+test("規則の評価: 選んだ件数が少ない日は、その規則の集計から外す", () => {
+  // 75点が2件しかない日(規則Aの最小件数3に満たない)と、5件ある日
+  const thin = [mkRow("2026-10-01", 0, { score: 75, net: 5, down: 1 }), mkRow("2026-10-01", 1, { score: 75, net: 5, down: 2 })];
+  for (let i = 0; i < 12; i++) thin.push(mkRow("2026-10-01", 10 + i, { score: 68, net: 0, down: 30 }));
+  const rows = [...thin, ...ruleDay("2026-10-02")];
+  const out = evaluateRules(rows, { holdoutFrom: "2026-10-01", simulations: 20, randomPicks: 50, iterations: 100 });
+  const a = out.periods.holdout.rules.find((r) => r.key === "A");
+  assert.equal(a.days, 1);
+  assert.equal(a.skippedDays, 1);
+  assert.ok(Math.abs(a.diff.mean - 0.8) < 1e-9); // 使われた日(10/2)だけの差
+});
+
+test("レポート: 規則の節(固定日・探索期間は参考値・確認期間)が出て、確認期間が空のときは説明が出る", () => {
+  const rows = [...ruleDay("2026-10-01"), ...ruleDay("2026-10-02")];
+  const summary = summarizeBacktest(rows, { topN: 10, simulations: 10, randomPicks: 20 });
+  const rules = evaluateRules(rows, { holdoutFrom: "2026-10-19", simulations: 10, randomPicks: 20, iterations: 50 });
+  const report = formatBacktestReport({
+    meta: { evaluationsUnique: 40, evaluationsRaw: 40, signalDateMin: "2026-10-01", signalDateMax: "2026-10-02", costPct: 0, topN: 10, bands: 3, exitAt: "open" },
+    results: { 1: { summary, rules, skipped: { noScore: 0, staleBasis: 0, noCalendar: 0, notElapsed: 0, noPrice: 0 }, delayedEntry: 0 } },
+  });
+  assert.match(report, /事前に固定した選び方の評価\(規則は 2026-10-19 に固定/);
+  assert.match(report, /探索期間.*参考値/);
+  assert.match(report, /確認期間\(基準日が 2026-10-19 以降\)/);
+  assert.match(report, /まだ評価がありません/);
+  assert.match(report, /A: スコア72以上/);
+  assert.match(report, /規則B・Cは、探索期間の結果を見て作ったもの/);
+});
+
+test("スクリプトは、規則の評価に確認期間の開始日(holdoutFrom)を渡し、ワークフローにも入力がある(配線の確認)", () => {
+  const src = readFileSync(new URL("../scripts/backtest-d1.js", import.meta.url), "utf8");
+  assert.match(src, /evaluateRules\(built\[h\]\.rows, \{ holdoutFrom: args\.holdoutFrom \}\)/);
+  const wf = readFileSync(new URL("../.github/workflows/backtest-d1.yml", import.meta.url), "utf8");
+  assert.match(wf, /holdoutFrom:/);
+  assert.match(wf, /BACKTEST_HOLDOUT_FROM: \$\{\{ inputs\.holdoutFrom \}\}/);
 });
 
 test("バックテストのスクリプトは、D1に対してSELECTしか実行しない(書き込みの呼び出しを持たない)", () => {
