@@ -5,7 +5,7 @@ on:
   # GitHub Actionsのscheduleは数分〜数十分遅れることがある。
   # scheduleはデフォルトブランチ(main)のワークフローだけが対象になる。
   schedule:
-    - cron: "0 8 * * 1-5"
+    - cron: "17 8 * * 1-5"
   workflow_dispatch:
     inputs:
       cutoffDate:
