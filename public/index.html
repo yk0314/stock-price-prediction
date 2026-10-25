@@ -76,6 +76,16 @@
       </div>
       <p class="section-note">取得日時が新しい順に表示しています。売却した内容は「売却（SELL登録）」から記録できます。</p>
       <p id="holdings-message" class="form-message" role="status"></p>
+
+      <!-- 未完了取引の状況(保有中・未売却の取引だけの集計とグラフ) -->
+      <section id="open-positions" class="open-positions" aria-labelledby="open-positions-title">
+        <div class="section-head">
+          <h3 id="open-positions-title">未完了取引の状況</h3>
+        </div>
+        <p class="section-note">売買が完了していない取引(保有中・未売却)だけを集計しています。売却済みの取引と、約定していない注文は含みません。</p>
+        <div id="open-positions-panel" aria-live="polite">読み込み中...</div>
+      </section>
+
       <div id="holdings-list" aria-live="polite">読み込み中...</div>
     </section>
 

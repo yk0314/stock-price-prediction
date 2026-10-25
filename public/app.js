@@ -277,6 +277,275 @@ const OrderAssist = (function () {
 })();
 /* ORDER-ASSIST:END */
 const OA = OrderAssist;
+
+/* OPEN-POSITIONS:BEGIN
+ * 「未完了取引の状況」(保有中・未売却の取引だけ)の集計・グラフ用データ・HTML生成。
+ * 画面(ブラウザ)で動くコードそのものを、test/open-positions.test.js が取り出してテストする。DOMには触れない。
+ *
+ * 入力は GET /api/holdings の配列。保有数量が0より大きい銘柄だけが返り(取消済みの取引は除外)、
+ * 保有数量・平均取得単価は取引履歴から移動平均法で計算済み(worker/src/tradeLogic.mjs の buildHoldings)。
+ * 「未完了」の判定は、この既存の保有判定(保有数量 > 0)に従い、新しいルールは作らない。
+ * 約定前の注文はtradesに記録されないため、保有に混ざらない。
+ * 購入金額 = 平均取得単価(登録した約定価格の移動平均)× 保有株数。手数料はtradesに保存されていないので含めない。
+ * データが無い値(株価・平均取得単価)は推測せず null(= 画面では「算出不可」)にする。
+ */
+const OpenPositions = (function () {
+  const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+  const SLICE_COLORS = ["#e8b84b", "#5aa9e6", "#34d399", "#c084fc", "#f97316", "#f0625f", "#2dd4bf"];
+  const OTHER_COLOR = "#6b7686";
+
+  /** 保有銘柄を、銘柄ごとの行にする。保有数量が正でないものは除き、同じ銘柄コードは二重に数えない。 */
+  function buildRows(holdings) {
+    const seen = new Set();
+    const rows = [];
+    let duplicates = 0;
+    for (const h of Array.isArray(holdings) ? holdings : []) {
+      if (!h || !isNum(h.quantity) || !(h.quantity > 0)) continue;
+      const code = String(h.code ?? "");
+      if (seen.has(code)) {
+        duplicates++;
+        continue;
+      }
+      seen.add(code);
+      const avgCost = isNum(h.avgCost) && h.avgCost > 0 ? h.avgCost : null;
+      const currentPrice = isNum(h.currentPrice) && h.currentPrice > 0 ? h.currentPrice : null;
+      const cost = avgCost !== null ? avgCost * h.quantity : null;
+      const value = currentPrice !== null ? currentPrice * h.quantity : null;
+      const pnl = cost !== null && value !== null ? value - cost : null;
+      rows.push({
+        code,
+        name: h.name ?? null,
+        quantity: h.quantity,
+        avgCost,
+        currentPrice,
+        priceAsOf: h.priceAsOf ?? null,
+        cost,
+        value,
+        pnl,
+        pnlPct: pnl !== null ? (pnl / cost) * 100 : null,
+      });
+    }
+    return { rows, duplicates };
+  }
+
+  function sum(rows, pick) {
+    return rows.reduce((a, r) => a + pick(r), 0);
+  }
+
+  /**
+   * 未完了取引の集計。
+   *  - 保有銘柄数・保有株数: 保有数量が正の銘柄すべて
+   *  - 購入金額: 平均取得単価が分かる銘柄の合計 / 現在評価額: 株価が分かる銘柄の合計
+   *  - 含み損益・損益率: 購入金額と株価の両方が分かる銘柄(comparable)だけで計算する(片方しか分からない銘柄は含めない)
+   */
+  function summarize(holdings) {
+    const { rows, duplicates } = buildRows(holdings);
+    const costRows = rows.filter((r) => r.cost !== null);
+    const valueRows = rows.filter((r) => r.value !== null);
+    const comparable = rows.filter((r) => r.pnl !== null);
+    const comparableCost = sum(comparable, (r) => r.cost);
+    const pnl = comparable.length > 0 ? sum(comparable, (r) => r.pnl) : null;
+    const dates = rows.map((r) => r.priceAsOf).filter(Boolean).sort();
+    return {
+      count: rows.length,
+      quantity: sum(rows, (r) => r.quantity),
+      purchaseTotal: costRows.length > 0 ? sum(costRows, (r) => r.cost) : null,
+      valueTotal: valueRows.length > 0 ? sum(valueRows, (r) => r.value) : null,
+      pnl,
+      pnlPct: pnl !== null && comparableCost > 0 ? (pnl / comparableCost) * 100 : null,
+      comparableCount: comparable.length,
+      comparableCost: comparable.length > 0 ? comparableCost : null,
+      missingPrice: rows.filter((r) => r.value === null),
+      missingCost: rows.filter((r) => r.cost === null),
+      priceAsOfMin: dates[0] ?? null,
+      priceAsOfMax: dates[dates.length - 1] ?? null,
+      duplicates,
+      rows,
+    };
+  }
+
+  /** 購入金額の大きい順(購入金額が不明な銘柄は最後)。 */
+  function byCostDesc(rows) {
+    return [...rows].sort((a, b) => (b.cost ?? -1) - (a.cost ?? -1) || (a.code < b.code ? -1 : 1));
+  }
+
+  /** 保有資金の内訳(購入金額の構成比)。maxSlicesを超える分は「その他(N銘柄)」にまとめる。構成比の合計は1。 */
+  function composition(rows, maxSlices = 8) {
+    const list = byCostDesc(rows.filter((r) => r.cost !== null && r.cost > 0));
+    const total = sum(list, (r) => r.cost);
+    if (list.length === 0 || !(total > 0)) return [];
+    const head = list.length > maxSlices ? list.slice(0, maxSlices - 1) : list;
+    const rest = list.length > maxSlices ? list.slice(maxSlices - 1) : [];
+    const parts = head.map((r) => ({ label: r.name ? `${r.code} ${r.name}` : r.code, code: r.code, cost: r.cost, ratio: r.cost / total, count: 1 }));
+    if (rest.length > 0) {
+      const restCost = sum(rest, (r) => r.cost);
+      parts.push({ label: `その他(${rest.length}銘柄)`, code: null, cost: restCost, ratio: restCost / total, count: rest.length });
+    }
+    return parts;
+  }
+
+  /** グラフ用の短い銘柄ラベル(コード + 銘柄名。長い名前は省略)。 */
+  function shortLabel(row, max = 14) {
+    const name = row.name ? [...String(row.name)] : [];
+    const clipped = name.length > max ? `${name.slice(0, max).join("")}…` : name.join("");
+    return clipped ? `${row.code} ${clipped}` : String(row.code);
+  }
+
+  // ---- HTML(文字列)の生成。整形関数fは呼び出し側(app.js)から渡す: { esc, yen, signedYen, pct, cls } ----
+
+  function costValueChart(rows, f) {
+    const list = byCostDesc(rows).filter((r) => r.cost !== null);
+    if (list.length === 0) return `<div class="no-data">購入金額を算出できる銘柄がないため、グラフを表示できません。</div>`;
+    const W = 360;
+    const left = 8;
+    const plotW = W - left - 92;
+    const groupH = 50;
+    const max = Math.max(...list.map((r) => Math.max(r.cost, r.value ?? 0)));
+    const barW = (v) => Math.max(1, Math.round((v / max) * plotW * 10) / 10);
+    const H = 6 + list.length * groupH;
+    const parts = [];
+    list.forEach((r, i) => {
+      const y = 6 + i * groupH;
+      parts.push(`<text x="${left}" y="${y + 10}" class="oc-label">${f.esc(shortLabel(r))}</text>`);
+      parts.push(`<rect x="${left}" y="${y + 15}" width="${barW(r.cost)}" height="10" rx="2" class="oc-bar-cost"><title>購入金額 ${f.esc(f.yen(r.cost))}</title></rect>`);
+      parts.push(`<text x="${left + barW(r.cost) + 4}" y="${y + 24}" class="oc-value">${f.esc(f.yen(r.cost))}</text>`);
+      if (r.value !== null) {
+        parts.push(`<rect x="${left}" y="${y + 29}" width="${barW(r.value)}" height="10" rx="2" class="oc-bar-value"><title>現在評価額 ${f.esc(f.yen(r.value))}</title></rect>`);
+        parts.push(`<text x="${left + barW(r.value) + 4}" y="${y + 38}" class="oc-value">${f.esc(f.yen(r.value))}</text>`);
+      } else {
+        parts.push(`<text x="${left}" y="${y + 38}" class="oc-na-text">現在評価額: 株価を取得できず算出不可</text>`);
+      }
+    });
+    return `
+      <div class="oc-legend-inline"><span><i class="oc-swatch oc-bar-cost"></i>購入金額</span><span><i class="oc-swatch oc-bar-value"></i>現在評価額</span></div>
+      <svg viewBox="0 0 ${W} ${H}" class="oc-svg" role="img" aria-label="銘柄別の購入金額と現在評価額の比較">${parts.join("")}</svg>`;
+  }
+
+  function pnlChart(rows, f) {
+    const list = rows.filter((r) => r.pnl !== null).sort((a, b) => b.pnl - a.pnl || (a.code < b.code ? -1 : 1));
+    if (list.length === 0) return `<div class="no-data">株価を取得できた銘柄がないため、含み損益のグラフを表示できません。</div>`;
+    const W = 360;
+    const axisX = 180;
+    const maxBar = 100;
+    const groupH = 38;
+    const maxAbs = Math.max(...list.map((r) => Math.abs(r.pnl)));
+    const H = 6 + list.length * groupH;
+    const parts = [`<line x1="${axisX}" y1="0" x2="${axisX}" y2="${H}" class="oc-axis"/>`];
+    list.forEach((r, i) => {
+      const y = 6 + i * groupH;
+      const w = maxAbs > 0 ? Math.round((Math.abs(r.pnl) / maxAbs) * maxBar * 10) / 10 : 0;
+      const positive = r.pnl >= 0;
+      parts.push(`<text x="8" y="${y + 10}" class="oc-label">${f.esc(shortLabel(r))}</text>`);
+      parts.push(
+        `<rect x="${positive ? axisX : axisX - w}" y="${y + 15}" width="${w}" height="12" rx="2" class="${positive ? "oc-pos" : "oc-neg"}"><title>含み損益 ${f.esc(f.signedYen(r.pnl))}</title></rect>`
+      );
+      parts.push(
+        positive
+          ? `<text x="${axisX + w + 4}" y="${y + 25}" class="oc-value ${f.cls(r.pnl)}">${f.esc(f.signedYen(r.pnl))}</text>`
+          : `<text x="${axisX - w - 4}" y="${y + 25}" class="oc-value ${f.cls(r.pnl)}" text-anchor="end">${f.esc(f.signedYen(r.pnl))}</text>`
+      );
+    });
+    return `<svg viewBox="0 0 ${W} ${H}" class="oc-svg" role="img" aria-label="銘柄別の含み損益(金額)。右がプラス、左がマイナス">${parts.join("")}</svg>`;
+  }
+
+  function compositionChart(rows, f) {
+    const parts = composition(rows);
+    if (parts.length === 0) return `<div class="no-data">購入金額を算出できる銘柄がないため、内訳を表示できません。</div>`;
+    const plotW = 344;
+    let x = 8;
+    const color = (p, i) => (p.code === null ? OTHER_COLOR : SLICE_COLORS[i % SLICE_COLORS.length]);
+    const rects = parts.map((p, i) => {
+      const w = p.ratio * plotW;
+      const r = `<rect x="${x.toFixed(1)}" y="2" width="${w.toFixed(1)}" height="18" fill="${color(p, i)}"><title>${f.esc(p.label)} ${(p.ratio * 100).toFixed(1)}%</title></rect>`;
+      x += w;
+      return r;
+    });
+    const legend = parts
+      .map(
+        (p, i) =>
+          `<li><i class="oc-swatch" style="background:${color(p, i)}"></i><span class="oc-legend-name">${f.esc(p.label)}</span><span class="oc-legend-pct num">${(p.ratio * 100).toFixed(1)}%</span><span class="oc-legend-amt num">${f.esc(f.yen(p.cost))}</span></li>`
+      )
+      .join("");
+    return `<svg viewBox="0 0 360 22" class="oc-svg oc-stack" role="img" aria-label="保有資金の内訳(購入金額の銘柄別構成比)">${rects.join("")}</svg><ul class="oc-legend">${legend}</ul>`;
+  }
+
+  function table(rows, f) {
+    const na = `<span class="op-na">算出不可</span>`;
+    const body = byCostDesc(rows)
+      .map((r) => {
+        const pnlCls = f.cls(r.pnl);
+        return `<tr>
+          <td data-label="銘柄"><span class="stock-code">${f.esc(r.code)}</span> ${f.esc(r.name ?? "銘柄名未取得")}</td>
+          <td data-label="株数" class="num">${r.quantity.toLocaleString()}株</td>
+          <td data-label="購入金額" class="num">${r.cost !== null ? f.esc(f.yen(r.cost)) : na}</td>
+          <td data-label="現在評価額" class="num">${r.value !== null ? f.esc(f.yen(r.value)) : na}</td>
+          <td data-label="含み損益" class="num ${pnlCls}">${r.pnl !== null ? f.esc(f.signedYen(r.pnl)) : na}</td>
+          <td data-label="損益率" class="num ${pnlCls}">${r.pnlPct !== null ? f.esc(f.pct(r.pnlPct)) : na}</td>
+        </tr>`;
+      })
+      .join("");
+    return `<div class="op-table-wrap"><table class="op-table"><thead><tr><th>銘柄</th><th>株数</th><th>購入金額</th><th>現在評価額</th><th>含み損益</th><th>損益率</th></tr></thead><tbody>${body}</tbody></table></div>`;
+  }
+
+  /** パネル全体のHTML。updatedAtは画面の表示更新時刻(文字列)。 */
+  function render(holdings, f, { updatedAt = null } = {}) {
+    const s = summarize(holdings);
+    if (s.count === 0) {
+      return `<div class="no-data">現在、未完了の取引(保有中・未売却の銘柄)はありません。買いが約定して取引を登録すると、ここに表示されます。</div>`;
+    }
+    const na = `<span class="op-na">算出不可</span>`;
+    const cell = (label, valueHtml, cls = "", sub = "") =>
+      `<div class="stat-cell"><div class="stat-label">${label}</div><div class="stat-value num ${cls}">${valueHtml}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ""}</div>`;
+    const partialSub = s.missingPrice.length > 0 && s.comparableCount > 0 ? `評価額を算出できた${s.comparableCount}銘柄分` : "";
+    const cells = [
+      cell("保有銘柄数", `${s.count}`),
+      cell("保有株数", `${s.quantity.toLocaleString()}株`),
+      cell("購入金額", s.purchaseTotal !== null ? f.esc(f.yen(s.purchaseTotal)) : na),
+      cell("現在評価額", s.valueTotal !== null ? f.esc(f.yen(s.valueTotal)) : na, "", s.missingPrice.length > 0 && s.valueTotal !== null ? `株価が分かる${s.count - s.missingPrice.length}銘柄分` : ""),
+      cell("含み損益", s.pnl !== null ? f.esc(f.signedYen(s.pnl)) : na, f.cls(s.pnl), partialSub),
+      cell("含み損益率", s.pnlPct !== null ? f.esc(f.pct(s.pnlPct)) : na, f.cls(s.pnlPct), partialSub),
+    ].join("");
+
+    const names = (list) => list.map((r) => f.esc(r.name ? `${r.code} ${r.name}` : r.code)).join("、");
+    const caveats = [];
+    if (s.missingPrice.length > 0) {
+      caveats.push(
+        `株価を取得できない${s.missingPrice.length}銘柄(${names(s.missingPrice)})は、現在評価額と含み損益の合計に含めていません。` +
+          (s.comparableCount > 0
+            ? `含み損益・損益率は、評価額を算出できた${s.comparableCount}銘柄(購入金額 ${f.esc(f.yen(s.comparableCost))})の分だけです。`
+            : "含み損益・損益率は算出できません。")
+      );
+    }
+    if (s.missingCost.length > 0) {
+      caveats.push(`平均取得単価が不明の${s.missingCost.length}銘柄(${names(s.missingCost)})は、購入金額と損益を算出できません。`);
+    }
+    if (s.duplicates > 0) caveats.push(`同じ銘柄コードが重複していた${s.duplicates}件は、二重に数えていません。`);
+    const caveatHtml = caveats.map((c) => `<p class="op-caveat">${c}</p>`).join("");
+
+    const asOf = s.priceAsOfMin
+      ? s.priceAsOfMin === s.priceAsOfMax
+        ? f.esc(s.priceAsOfMin)
+        : `${f.esc(s.priceAsOfMin)}〜${f.esc(s.priceAsOfMax)}`
+      : "不明";
+    return `
+      <div class="stats-strip op-summary">${cells}</div>
+      ${caveatHtml}
+      <p class="op-meta">株価のデータ基準日: ${asOf}(リアルタイム価格ではありません)${updatedAt ? ` / 表示更新: ${f.esc(updatedAt)}` : ""}</p>
+      <p class="op-meta">購入金額は、登録した約定価格(平均取得単価)× 保有株数です。手数料は記録されていないため含みません。</p>
+      <h4 class="op-chart-title">銘柄別の購入金額と現在評価額</h4>
+      <div class="op-chart">${costValueChart(s.rows, f)}</div>
+      <h4 class="op-chart-title">銘柄別の含み損益(金額)</h4>
+      <div class="op-chart">${pnlChart(s.rows, f)}</div>
+      <h4 class="op-chart-title">保有資金の内訳(購入金額の構成比)</h4>
+      <div class="op-chart">${compositionChart(s.rows, f)}</div>
+      <h4 class="op-chart-title">銘柄別の一覧</h4>
+      ${table(s.rows, f)}`;
+  }
+
+  return { buildRows, summarize, composition, shortLabel, render };
+})();
+/* OPEN-POSITIONS:END */
+const OP = OpenPositions;
 const buyAssistSources = new Map(); // code -> BUY発注補助に使うデータ(ランキング・詳細画面で登録)
 const currentOrderText = { buy: "", sell: "" }; // 「注文内容をコピー」でコピーするテキスト
 const BUY_BUDGET_STORAGE_KEY = "orderAssist.buyBudget";
@@ -1086,18 +1355,38 @@ function renderHoldingCard(h, acquisitionDate, { detailed = true } = {}) {
   `;
 }
 
+/** 端末のローカル日時(YYYY-MM-DD HH:MM)。画面の「表示更新」に使う。 */
+function nowLocalStr() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** 「未完了取引の状況」パネル(集計・グラフ・一覧)。保有銘柄の再評価・取引の登録には影響しない、表示だけの処理。 */
+function renderOpenPositions(holdings) {
+  const el = document.getElementById("open-positions-panel");
+  el.innerHTML = OP.render(
+    holdings,
+    { esc, yen: yenOrDash, signedYen: signedYenOrDash, pct: (v) => fmtPct(v, 1, true), cls: percentClass },
+    { updatedAt: nowLocalStr() }
+  );
+}
+
 async function loadHoldings() {
   const el = document.getElementById("holdings-list");
   el.textContent = "読み込み中...";
+  document.getElementById("open-positions-panel").textContent = "読み込み中...";
   try {
     const [holdings, latestBuyDateByCode] = await Promise.all([fetchJson("/api/holdings"), getLatestBuyDateByCode()]);
     currentHoldings = holdings;
+    renderOpenPositions(holdings);
     const sorted = sortHoldingsByAcquisitionDesc(holdings, latestBuyDateByCode);
     el.innerHTML = sorted.length
       ? sorted.map((h) => renderHoldingCard(h, h.lastBuyDate ?? latestBuyDateByCode.get(h.code))).join("")
       : `<div class="no-data">現在保有中の銘柄はありません。</div>`;
   } catch {
     currentHoldings = [];
+    document.getElementById("open-positions-panel").innerHTML = `<div class="no-data">未完了取引の状況を取得できませんでした(集計はしていません)。</div>`;
     el.innerHTML = `<div class="no-data">保有銘柄を取得できませんでした。</div>`;
   }
 }

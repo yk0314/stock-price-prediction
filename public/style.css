@@ -1641,3 +1641,250 @@ a {
   border-color: rgba(52, 211, 153, 0.45);
   min-width: 72px;
 }
+
+/* ---- 未完了取引の状況(保有銘柄画面) ----
+   保有中・未売却の取引だけの集計とグラフ。既存のダーク×ゴールドの配色(--buy / --sell / --accent)に合わせる。 */
+
+.open-positions {
+  margin-bottom: 28px;
+}
+
+.open-positions .section-head h3 {
+  margin: 0;
+  font-size: 1.05em;
+}
+
+.op-summary {
+  margin-bottom: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+}
+
+.stat-sub {
+  margin-top: 4px;
+  font-size: 0.68em;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+
+.op-na {
+  font-family: inherit;
+  font-size: 0.8em;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.op-caveat {
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  font-size: 0.8em;
+  line-height: 1.55;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-radius: var(--radius);
+}
+
+.op-meta {
+  margin: 0 0 6px;
+  font-size: 0.78em;
+  color: var(--text-muted);
+}
+
+.op-chart-title {
+  margin: 20px 0 8px;
+  font-size: 0.9em;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.op-chart {
+  /* グラフはスマートフォン幅(約360px)を基準に描いている。PCで引き伸ばしすぎると文字が大きくなるため、上限を決める */
+  max-width: 440px;
+}
+
+.oc-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.oc-label {
+  font-size: 11px;
+  fill: var(--text-muted);
+}
+
+.oc-value {
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  fill: var(--text);
+}
+
+.oc-value.positive {
+  fill: var(--buy);
+}
+
+.oc-value.negative {
+  fill: var(--sell);
+}
+
+.oc-na-text {
+  font-size: 10.5px;
+  fill: var(--text-faint);
+}
+
+.oc-bar-cost {
+  fill: var(--text-faint);
+  background: var(--text-faint);
+}
+
+.oc-bar-value {
+  fill: var(--accent);
+  background: var(--accent);
+}
+
+.oc-pos {
+  fill: var(--buy);
+}
+
+.oc-neg {
+  fill: var(--sell);
+}
+
+.oc-axis {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.oc-legend-inline {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 6px;
+  font-size: 0.78em;
+  color: var(--text-muted);
+}
+
+.oc-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  border-radius: 2px;
+  vertical-align: -1px;
+}
+
+.oc-stack {
+  margin-bottom: 10px;
+}
+
+.oc-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.82em;
+}
+
+.oc-legend li {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: baseline;
+  gap: 6px 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.oc-legend-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.oc-legend-pct {
+  color: var(--text-muted);
+}
+
+.oc-legend-amt {
+  min-width: 78px;
+  text-align: right;
+  color: var(--text);
+}
+
+.op-table-wrap {
+  overflow-x: auto;
+}
+
+.op-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85em;
+}
+
+.op-table th,
+.op-table td {
+  padding: 8px 10px;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.op-table th:first-child,
+.op-table td:first-child {
+  text-align: left;
+  white-space: normal;
+}
+
+.op-table th {
+  font-size: 0.78em;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+
+/* スマートフォン: 表を、銘柄ごとのカード(項目名 + 値)に並べ替える */
+@media (max-width: 640px) {
+  .op-table thead {
+    display: none;
+  }
+
+  .op-table,
+  .op-table tbody,
+  .op-table tr,
+  .op-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .op-table tr {
+    margin-bottom: 10px;
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  .op-table td {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 5px 0;
+    border-bottom: none;
+    text-align: right;
+    white-space: normal;
+  }
+
+  .op-table td::before {
+    content: attr(data-label);
+    flex-shrink: 0;
+    color: var(--text-faint);
+    font-size: 0.85em;
+    text-align: left;
+  }
+
+  .op-table td:first-child {
+    justify-content: flex-start;
+    font-weight: 600;
+  }
+
+  .op-table td:first-child::before {
+    content: none;
+  }
+}
