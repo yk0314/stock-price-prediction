@@ -17,3 +17,21 @@ id = "c1393b19e3c248a194ed9ef222f8e3b9"
 binding = "DB"
 database_name = "jp-stock-ai-app-db"
 database_id = "825dc7ca-f43f-4864-bd8b-54908824ef8a"
+
+# ---- pipeline の定刻起動(Cron Trigger) ----
+# GitHub Actions の schedule は、数時間遅れたり、起動しないことがあるため、Workers のCron Triggerから workflow_dispatch で起動する。
+# 2本のcronは、src/scheduler.js の PRIMARY_CRON / WATCHDOG_CRON と一致させる(test/scheduler.test.js が検査する)。
+#   17:10 JST: 今日の実行が無ければ起動 / 17:40 JST: 見張り(今日の実行が無い、または全て失敗なら、もう一度起動。1日最大2回)
+# Secret(コードに書かない): cd worker && npx wrangler secret put GITHUB_DISPATCH_TOKEN
+[triggers]
+# 注意: Cloudflareのcronは、曜日が「1 = 日曜 〜 7 = 土曜」。平日は MON-FRI と書く(1-5 は「日〜木」になってしまう)
+crons = ["10 8 * * MON-FRI", "40 8 * * MON-FRI"]
+
+[vars]
+GITHUB_REPO = "yk0314/stock-price-prediction"
+GITHUB_WORKFLOW = "pipeline.yml"
+GITHUB_REF = "main"
+# DRY_RUN = "true"   # 起動せず、判断だけをログに出す(動作確認用)
+
+[observability]
+enabled = true

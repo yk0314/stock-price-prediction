@@ -519,7 +519,14 @@ async function handleCancelTrade(db, tradeId) {
   };
 }
 
+import { handleScheduled } from "./scheduler.js";
+
 export default {
+  // Cron Trigger(wrangler.tomlの[triggers])。pipelineを定刻に起動する(詳細は scheduler.js)。HTTPからは呼べない
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(handleScheduled(event, env));
+  },
+
   async fetch(request, env) {
     try {
       const url = new URL(request.url);

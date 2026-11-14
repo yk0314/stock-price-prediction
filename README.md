@@ -17,7 +17,7 @@ J-Quants API ─┐
               ├─▶ GitHub Actions ──▶ Cloudflare D1  (株価・銘柄マスタ・TOPIX・AI評価・財務・売買履歴・書き込み台帳)
 Gemini API ───┘     │            └─▶ Cloudflare KV  (表示用データ: meta / ranking / stocks / analysis:* / prices:* / history:*)
                     │
-                    ├─ pipeline.yml      平日 17:00 JST   特徴量 → スクリーニング → Gemini評価 → ランキング
+                    ├─ pipeline.yml      平日 17:10 JST(Workersのcronが起動)   特徴量 → スクリーニング → Gemini評価 → ランキング
                     ├─ sync-prices.yml   毎日 18:30 JST   全銘柄の日足・TOPIX・銘柄マスタをD1へ差分で蓄積
                     ├─ screening-backtest.yml  手動実行のみ  スクリーニングスコアの検証(Geminiは使わない)
                     └─ backtest-d1.yml  手動実行のみ  D1のAI評価と株価から、評価後の値動きを測る(D1は読み取りのみ)
@@ -175,12 +175,52 @@ sync-prices の予算 = `min(D1_DAILY_WRITE_BUDGET, D1_DAILY_WRITE_TOTAL − 今
 
 ### 実行方法
 
-- **pipeline.yml**(JP Stock AI Pipeline): 平日 17:00 JST(08:00 UTC)に自動実行。手動は Actions → Run workflow。入力: `cutoffDate`(空欄なら最新の取引日を自動判定)、`universeMode`(`phase1_subset` / `all`)。タイムアウト240分。1回の実行は、Gemini の待機時間(既定30秒 × 約155銘柄)のため、約90分かかります。
+- **pipeline.yml**(JP Stock AI Pipeline): 平日 17:10 JST に、Cloudflare Workers の Cron Trigger が起動します(17:40 JST に見張り。下の「pipeline の定刻起動」)。GitHubの `schedule` は、数時間遅れることがあるため使いません。手動は Actions → Run workflow。入力: `cutoffDate`(空欄なら最新の取引日を自動判定)、`universeMode`(`phase1_subset` / `all`)。タイムアウト240分。1回の実行は、Gemini の待機時間(既定30秒 × 約155銘柄)のため、約90分かかります。
 - **sync-prices.yml**(Sync Prices): 毎日 18:30 JST(09:30 UTC)に自動実行。手動の入力: `lookbackDays`、`writeBudget`。タイムアウト60分。
 - **backtest-d1.yml**(JP Stock AI Backtest (D1)): 手動のみ。入力: `from`(この基準日以降の評価だけを使う)、`horizons`(保有日数。既定 1,3,5)、`costPct`(往復コスト%。既定0)、`top`(毎日の上位N件。既定10)、`maxStaleDays`(評価の基準日が、生成された日よりこの日数より前のものは除外。既定5)、`scoreCuts`(スコアの水準を分ける区切り。既定 62,68,72)、`exitAt`(売る価格。`open` が既定、`close` は比較用)、`holdoutFrom`(確認期間の開始日。既定 2026-10-19)。D1には読み取りだけを行い、結果は実行サマリと artifact(`data/backtest-d1.json`)に出る。
 - **screening-backtest.yml**: 手動のみ。`node test/unit.test.js` と `node src/screening-backtest.js` を実行する(J-Quantsだけを使い、Gemini・Cloudflareは使わない)。
 - pipeline と sync-prices は同じ `concurrency` グループで、同時には走りません(D1への書き込みが重ならないようにするため)。待機中の後続は、実行中のものを中断せず順番に実行されます。
 - Actionsのランナーは Node 20 です。
+
+### pipeline の定刻起動(Cloudflare Workers の Cron Trigger)
+
+GitHub Actions の `schedule` は、混雑すると**数時間遅れたり、起動しなかったり**します(実際に、17時台の設定が22時台に動いたことがありました)。そのため、pipeline は `schedule` を使わず、**Cloudflare Workers の Cron Trigger(定刻に動く)から、GitHub の `workflow_dispatch`(手動実行と同じ経路)で起動**します。
+
+| 時刻(JST) | 動作 |
+|---|---|
+| 平日 17:10 | 今日の実行が無ければ、pipeline を起動する(手動などで既に動いていれば、起動しない) |
+| 平日 17:40 | 見張り。今日の実行が無い、または全て失敗なら、もう一度起動する(1日の起動は最大2回)。実行中・成功なら、何もしない |
+
+- 実装: `worker/src/scheduler.js`。設定: `worker/wrangler.toml` の `[triggers]` と `[vars]`。起動時は、必ず `universeMode=all`(全銘柄モード)を指定します(手動実行の既定は開発用の `phase1_subset` のため)。
+- **cronの曜日は、Cloudflareでは「1 = 日曜 〜 7 = 土曜」**です。平日は `MON-FRI` と書きます(一般的なcronの `1-5` は「日〜木」になります)。
+- 時刻の変更は、`wrangler.toml` の `crons` と、`scheduler.js` の `PRIMARY_CRON` / `WATCHDOG_CRON` の両方を、同じ値にします(`test/scheduler.test.js` が、一致を検査します)。
+- 失敗・設定不備は、Workerのログと、D1の `error_logs`(`source='scheduler'`)に記録されます。起動が失敗しても、見張り(17:40)が、もう一度試します。
+- 保証されないこと: Cron Triggerの配信は、まれに重複したり、設定変更の反映に時間がかかったりします。重複しても、同じ `concurrency` グループで順番に実行されるため、同時には動きません。見張りは、起動前に「今日の実行があるか」を確認するので、通常は二重起動しません。
+
+**初回の設定(1回だけ。本番の操作は、あなたが行います)**
+
+1. GitHub で、**このリポジトリだけ**に権限を限定した「Fine-grained personal access token」を作成します(Settings → Developer settings → Personal access tokens → Fine-grained tokens)。Repository access は「Only select repositories」でこのリポジトリのみ、Permissions は **Actions: Read and write**(Metadata: Read-only は自動で付きます)。有効期限を決め、期限が切れる前に更新します。
+2. Worker に、Secret として登録します(トークンはコードや `wrangler.toml` に書かない)。
+   ```bash
+   cd worker
+   npx wrangler secret put GITHUB_DISPATCH_TOKEN
+   ```
+3. 動作確認(起動はせず、判断だけをログに出す)。`worker/.dev.vars`(`.gitignore` 済み)に `GITHUB_DISPATCH_TOKEN=...` と `DRY_RUN=true` を書き、次を実行します。
+   ```bash
+   cd worker
+   npx wrangler dev --test-scheduled
+   # 別のターミナルで:
+   curl "http://localhost:8787/__scheduled?cron=10+8+*+*+MON-FRI"
+   ```
+   ログに、「起動する判断: 今日の実行が見つからない」などが出れば、GitHub APIへの接続と認証は、成功です(`DRY_RUN` のときは、実際の起動はしません)。
+4. Worker をデプロイします(cronが有効になります)。
+   ```bash
+   cd worker
+   npx wrangler deploy
+   ```
+5. 最初の平日に、17:10 JST ごろ、Actions に `workflow_dispatch` の実行が作られることを確認します。確認できたら、`pipeline.yml` から `schedule` を外します(二重起動を避けるため。外した状態が、このREADMEの前提です)。
+
+**うまくいかないとき**: Actions → JP Stock AI Pipeline → Run workflow で、手動で起動できます(`universeMode` は `all`)。
 
 ### 公開リポジトリでの運用上の注意
 

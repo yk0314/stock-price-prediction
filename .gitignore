@@ -2,3 +2,7 @@ data/
 node_modules/
 .env
 .wrangler/
+
+.dev.vars*
+!.dev.vars.example
+!.env.example
