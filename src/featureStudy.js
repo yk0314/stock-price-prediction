@@ -88,6 +88,24 @@ export function addRows(panel, rows) {
   }
 }
 
+/**
+ * 読み込んだ日足の「日付ごとの件数」から、営業日を決める。
+ * 件数が、中央値の minShare 倍に満たない日(蓄積が途中の日・一部の銘柄だけの日)は、全銘柄を比べる検証が歪むので、除く。
+ * 戻り値: { days: 昇順の営業日, dropped: [{date, count}], medianCount }
+ */
+export function deriveTradingDays(countsByDate, { minShare = 0.5 } = {}) {
+  const entries = [...countsByDate.entries()].filter(([, n]) => n > 0).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  if (entries.length === 0) return { days: [], dropped: [], medianCount: 0 };
+  const medianCount = median(entries.map(([, n]) => n));
+  const days = [];
+  const dropped = [];
+  for (const [date, count] of entries) {
+    if (count >= medianCount * minShare) days.push(date);
+    else dropped.push({ date, count });
+  }
+  return { days, dropped, medianCount };
+}
+
 // ---------------------------------------------------------------------------------------------
 // 特徴量・成績
 // ---------------------------------------------------------------------------------------------
@@ -502,6 +520,12 @@ export function formatFeatureReport({ meta, summary }) {
   L.push(
     `日足: ${meta.firstDay} 〜 ${meta.lastDay}(${meta.coverage.days}営業日・${meta.coverage.codes}銘柄) / 流動性の足切り: 直近20日の平均売買代金 ${(meta.minTurnoverYen / 100_000_000).toFixed(1)}億円以上 / 1日に比べた銘柄数(平均) ${p.avgStocks === null ? "-" : Math.round(p.avgStocks)}`
   );
+  if (meta.droppedDays?.length) {
+    L.push(
+      `銘柄数が少ない日を除外: ${meta.droppedDays.length}日(${meta.droppedDays.slice(0, 5).map((d) => `${d.date}:${d.count}件`).join("、")}${meta.droppedDays.length > 5 ? " ほか" : ""})`
+    );
+  }
+  if (meta.masterCodes) L.push(`銘柄の一覧は stocks マスタ(${meta.masterCodes}件)から取得。日足のある銘柄は ${meta.coverage.codes}件。`);
   L.push(
     `探索期間 ${p.exploreFrom ?? "-"} 〜 ${p.exploreTo ?? "-"}(${p.exploreDays}日) / 確認期間 ${p.holdoutFrom ?? "-"} 〜 ${p.holdoutTo ?? "-"}(${p.holdoutDays}日) / 往復コスト ${meta.costPct}% / 約定: 基準日の翌営業日の始値で買い、保有日数後の始値で売る`
   );

@@ -11,6 +11,7 @@ import {
   addRows,
   blockBootstrapMeanCI,
   createPanel,
+  deriveTradingDays,
   featuresAt,
   formatFeatureReport,
   pearson,
@@ -134,6 +135,23 @@ test("判定: 探索と確認の両方で、同じ向きに、区間が0を含�
   assert.equal(verdict(null, s(0.04, 0.01, 0.07)), "データ不足");
 });
 
+test("営業日の決め方: 件数が中央値の半分に満たない日(蓄積が途中の日)は除き、昇順に並べる", () => {
+  const counts = new Map([
+    ["2025-01-06", 4000],
+    ["2025-01-07", 4100],
+    ["2025-01-08", 300], // 一部の銘柄だけ
+    ["2025-01-09", 4050],
+    ["2024-12-27", 3990], // 順不同で入れても、昇順になる
+    ["2025-01-10", 0],
+  ]);
+  const r = deriveTradingDays(counts);
+  assert.deepEqual(r.days, ["2024-12-27", "2025-01-06", "2025-01-07", "2025-01-09"]);
+  assert.deepEqual(r.dropped, [{ date: "2025-01-08", count: 300 }]);
+  assert.ok(r.medianCount > 3900);
+  assert.deepEqual(deriveTradingDays(new Map()), { days: [], dropped: [], medianCount: 0 });
+  assert.deepEqual(deriveTradingDays(counts, { minShare: 0.05 }).dropped, []); // 基準を緩めれば、除かれない
+});
+
 /**
  * 効果を仕込んだ合成データ: 銘柄ごとに、一定の上がりやすさ(drift)と、一定の動きの大きさ(sigma)を持たせる。
  *  - 過去に上がった銘柄は、その後も上がる(ret20 などに順位づけの力がある)
@@ -235,6 +253,9 @@ test("レポート: 見出しと表が出て、データが少なくても例外
   assert.match(text, /どれだけ動いたか/);
   assert.match(text, /が小さい銘柄は、その後も動かないか/);
   assert.match(text, /生存者バイアス/); // 途中で終わる銘柄が無い合成データなので、注意が出る
+  const text2 = formatFeatureReport({ meta: { ...meta, masterCodes: 4500, droppedDays: [{ date: "2025-03-03", count: 120 }] }, summary });
+  assert.match(text2, /銘柄数が少ない日を除外: 1日\(2025-03-03:120件\)/);
+  assert.match(text2, /stocks マスタ\(4500件\)/);
   for (const [, label] of FEATURE_KEYS.map((k) => [k, k])) assert.ok(text.length > 0 && label);
 
   const tiny = createPanel(daysList(30)); // 履歴が足りない
@@ -250,9 +271,16 @@ test("読み取り専用: 実行スクリプトは SELECT しか実行せず、�
   assert.equal((script.match(/d1\.query\(/g) ?? []).length, 1); // 問い合わせの入口は、SELECTだけを通す select() の1か所
   const strip = (s) => s.replace(/\/\/.*$/gm, "").replace(/"[^"]*"/g, '""').replace(/`[^`]*`/g, "``");
   assert.ok(!/\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER)\b/.test(strip(script)));
-  // SQL文の中身も確認する(文字列を伏せる前)
-  const sqls = [...script.matchAll(/select\(d1,\s*"([^"]+)"/g)].map((m) => m[1]);
-  assert.ok(sqls.length >= 3 && sqls.every((q) => /^\s*SELECT\b/i.test(q)));
+  // SQL文の中身も確認する(文字列を伏せる前)。"..." と `...` の両方
+  const sqls = [...script.matchAll(/select\(\s*d1,\s*(?:"([^"]+)"|`([^`]+)`)/g)].map((m) => m[1] ?? m[2]);
+  assert.ok(sqls.length >= 2 && sqls.every((q) => /^\s*SELECT\b/i.test(q)));
+  // 全表走査を防ぐ: stock_prices は、必ず「code IN (...)」で絞って読む(日付だけの絞り込みは、1回ごとに全表を走査し、D1の読み取り上限を使い切る)
+  const priceQueries = sqls.filter((q) => /FROM\s+stock_prices/i.test(q));
+  assert.ok(priceQueries.length >= 1);
+  assert.ok(priceQueries.every((q) => /WHERE\s+code\s+IN\s*\(/i.test(q)), "stock_prices を code で絞らずに読んでいます(全表走査になります)");
+  assert.ok(!/date\s*<=\s*\?/i.test(priceQueries.join(" ")), "stock_prices を日付の範囲で読んでいます");
+  assert.ok(!/price_sync_dates/.test(script), "営業日は、読んだ日足から決める(price_sync_dates の範囲に縛られない)");
+  assert.match(script, /--max-rows|maxRows/); // 読み取り行数の上限がある
   const lib = readFileSync(new URL("../src/featureStudy.js", import.meta.url), "utf8");
   assert.ok(!/\b(fetch|writeFile|appendFile|readFile|process\.env)\b/.test(strip(lib)), "計算のモジュールに通信・保存・環境変数の処理があります");
 });
