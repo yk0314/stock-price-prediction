@@ -1,0 +1,57 @@
+name: JP Stock AI Feature Study (D1)
+
+on:
+  # 値動き・出来高の数字そのものに、その後の成績を順位づける力があるかを、D1の長い日足(全銘柄)で測る検証。
+  # D1を読み取るだけ(書き込みはしない)。全銘柄・全期間を1回読む(約120万行)ため、1日に何度も実行しない。
+  # 手動実行のみ。自動実行は追加しない。結果は、実行のサマリーに出る。
+  workflow_dispatch:
+    inputs:
+      holdoutFrom:
+        description: "確認期間の開始日(YYYY-MM-DD)。これより前が探索期間。省略時は 2026-03-02"
+        required: false
+        default: ""
+      costPct:
+        description: "往復コスト(%)。省略時は 0.3"
+        required: false
+        default: ""
+      minTurnoverOku:
+        description: "流動性の足切り: 直近20日の平均売買代金(億円)。省略時は 1"
+        required: false
+        default: ""
+      from:
+        description: "この日付以降の日足だけを使う(YYYY-MM-DD)。省略時は最初から"
+        required: false
+        default: ""
+
+jobs:
+  run-feature-study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node.js セットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 検証実行(D1は読み取りのみ)
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
+          FEATURES_HOLDOUT_FROM: ${{ inputs.holdoutFrom }}
+          FEATURES_COST_PCT: ${{ inputs.costPct }}
+          FEATURES_MIN_TURNOVER_OKU: ${{ inputs.minTurnoverOku }}
+          FEATURES_FROM: ${{ inputs.from }}
+        run: node scripts/analyze-features.js
+
+      - name: 結果(data/)をartifactとしてアップロード
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-study-${{ github.run_id }}
+          path: data/
+          retention-days: 30
+          if-no-files-found: ignore
