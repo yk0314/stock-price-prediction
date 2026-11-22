@@ -18,6 +18,23 @@ import { buildListedInfoByCode } from "./listedInfo.js";
 import { D1Client } from "./d1.js";
 import { fetchHeldCodes, logErrorToD1 } from "./d1Repository.js";
 
+/**
+ * 特徴量の計算に必要な取引日数(FEATURE_LOOKBACK_TRADING_DAYS+1)に、取得する(した)取引日数が足りるかを確認する。
+ * 足りなければ、原因が分かる文を返す。足りていれば null。
+ * (取得する期間に祝日が多いと、取引日が足りず、全銘柄の特徴量が計算できなくなる。2026-11-04〜11-20に実際に起きた)
+ */
+export function describeShortPriceHistory(
+  availableDays,
+  { required = config.FEATURE_LOOKBACK_TRADING_DAYS + 1, lookbackCalendarDays = config.FETCH_LOOKBACK_CALENDAR_DAYS, stage = "取得対象の" } = {}
+) {
+  if (availableDays >= required) return null;
+  return (
+    `[pipeline] ${stage}取引日が${availableDays}日で、特徴量の計算に必要な${required}日に足りません。` +
+    `祝日が多い時期は、取得する期間(FETCH_LOOKBACK_CALENDAR_DAYS=${lookbackCalendarDays}暦日)に含まれる取引日が減ります。` +
+    `この値を増やしてください。処理を中断します。`
+  );
+}
+
 function addDaysUTC(dateStr, days) {
   const d = new Date(dateStr + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() + days);
@@ -215,6 +232,14 @@ async function main() {
   const windowDates = tradingDays.length > 0
     ? tradingDaysBetween(tradingDays, fetchStartDate, cutoffDate)
     : weekdayDates(fetchStartDate, cutoffDate);
+  // 取得しても特徴量が計算できない(取引日が足りない)なら、APIを無駄に呼ぶ前に、原因が分かる形で中断する
+  const shortBeforeFetch = describeShortPriceHistory(windowDates.length, { stage: "取得対象の" });
+  if (shortBeforeFetch) {
+    console.error(shortBeforeFetch);
+    await flushJquantsEvents();
+    process.exitCode = 1;
+    return;
+  }
   let rawRows;
   try {
     rawRows = await jquants.fetchDailyQuotesForDates(windowDates, cutoffDate, {
@@ -236,6 +261,14 @@ async function main() {
     console.error(
       "[pipeline] raw dataが0件でした。J-Quantsのレスポンス形式・APIキー・cutoffDateを確認してください。処理を中断します。"
     );
+    process.exitCode = 1;
+    return;
+  }
+
+  // 実際に取得できた取引日数も確認する(取得対象は足りていても、APIから取れなかった日がある場合)
+  const shortAfterFetch = describeShortPriceHistory(new Set(rawRows.map((r) => r.Date ?? r.date)).size, { stage: "取得できた" });
+  if (shortAfterFetch) {
+    console.error(shortAfterFetch);
     process.exitCode = 1;
     return;
   }

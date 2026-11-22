@@ -2283,6 +2283,66 @@ config.GEMINI.requestIntervalMs = geminiOriginalIntervalMs;
 config.GEMINI.retryBackoffBaseMs = geminiOriginalBackoffMs;
 
 console.log(`\n[test] ${passed}件成功`);
+console.log("[test] 取得期間(FETCH_LOOKBACK_CALENDAR_DAYS)と、取引日の不足の検知");
+// 2026年秋の祝日(取引所の休場日)。62暦日の取得窓では、取引日が40日になり、特徴量に必要な41日に足りず、11/4〜11/20のパイプラインが毎日止まった。
+const HOLIDAYS_2026_AUTUMN = new Set(["2026-09-21", "2026-09-22", "2026-09-23", "2026-10-12", "2026-11-03", "2026-11-23"]);
+{
+  const { weekdayDates, tradingDaysBetween, addDays } = await import("../src/tradingCalendar.js");
+  const tradingDays2026 = weekdayDates("2026-06-01", "2026-12-31").filter((d) => !HOLIDAYS_2026_AUTUMN.has(d));
+  const windowCount = (cutoff, calendarDays) => tradingDaysBetween(tradingDays2026, addDays(cutoff, -calendarDays), cutoff).length;
+  const required = config.FEATURE_LOOKBACK_TRADING_DAYS + 1;
+
+  await test("過去の不具合の再現: 62暦日の取得窓では、2026-11-04〜11-20の基準日で、取引日が必要数(41日)に足りない", () => {
+    for (const cutoff of ["2026-11-04", "2026-11-10", "2026-11-20"]) {
+      assert.ok(windowCount(cutoff, 62) < required, `${cutoff}: 62暦日で${windowCount(cutoff, 62)}日`);
+    }
+    assert.equal(windowCount("2026-11-20", 62), 40); // 実際のログの「対象40日」と一致
+  });
+
+  await test("現在の設定(80暦日)では、2026年秋のどの営業日の基準日でも、必要数(41日)に余裕(+5日)をもって足りる", () => {
+    assert.equal(config.FETCH_LOOKBACK_CALENDAR_DAYS, 80);
+    let checked = 0;
+    for (const cutoff of weekdayDates("2026-09-01", "2026-12-31")) {
+      if (HOLIDAYS_2026_AUTUMN.has(cutoff)) continue;
+      assert.ok(windowCount(cutoff, config.FETCH_LOOKBACK_CALENDAR_DAYS) >= required + 5, `${cutoff}: ${windowCount(cutoff, config.FETCH_LOOKBACK_CALENDAR_DAYS)}日`);
+      checked++;
+    }
+    assert.ok(checked > 60);
+    assert.equal(windowCount("2026-11-20", config.FETCH_LOOKBACK_CALENDAR_DAYS) >= 51, true);
+  });
+
+  await test("どの80連続暦日にも、平日は56日以上ある。祝日・休場が10日あっても46日以上取れる(必要数41日を満たす)", () => {
+    for (let startOffset = 0; startOffset < 7; startOffset++) {
+      const start = addDays("2026-01-05", startOffset);
+      const weekdays = weekdayDates(start, addDays(start, config.FETCH_LOOKBACK_CALENDAR_DAYS)).length;
+      assert.ok(weekdays >= 56 && weekdays - 10 >= required, `${start}: 平日${weekdays}日`);
+    }
+  });
+}
+
+await test("取引日が足りないときは、原因(祝日で取引日が減ること)と対処(FETCH_LOOKBACK_CALENDAR_DAYSを増やす)が分かる文を返す。足りているときはnull", async () => {
+  const { describeShortPriceHistory } = await import("../src/pipeline.js");
+  const required = config.FEATURE_LOOKBACK_TRADING_DAYS + 1;
+  assert.equal(describeShortPriceHistory(required), null);
+  assert.equal(describeShortPriceHistory(required + 10), null);
+  const msg = describeShortPriceHistory(40, { stage: "取得対象の" });
+  assert.match(msg, /取得対象の取引日が40日/);
+  assert.match(msg, new RegExp(`必要な${required}日`));
+  assert.match(msg, /FETCH_LOOKBACK_CALENDAR_DAYS/);
+  assert.match(msg, /祝日/);
+  assert.match(describeShortPriceHistory(0, { stage: "取得できた" }), /取得できた取引日が0日/);
+});
+
+await test("配線: 取得対象の取引日の確認は、J-Quantsへの取得の前に行う。取得後にも、実際に取れた取引日を確認する", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/pipeline.js", import.meta.url), "utf8");
+  const before = src.indexOf('describeShortPriceHistory(windowDates.length');
+  const fetchCall = src.indexOf("jquants.fetchDailyQuotesForDates(windowDates");
+  const after = src.indexOf("describeShortPriceHistory(new Set(rawRows.map");
+  assert.ok(before > 0 && fetchCall > before, "取得の前に確認していません");
+  assert.ok(after > fetchCall, "取得の後に確認していません");
+});
+
 if (process.exitCode) {
   console.error("[test] 失敗したテストがあります");
 } else {
