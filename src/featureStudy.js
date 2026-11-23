@@ -40,6 +40,12 @@ export const DEFAULTS = {
   upThresholds: [3, 5],
   flatPct: 3,
   minDaysForVerdict: 20,
+  // 長い期間の検証(scripts/analyze-features-jquants.js)で使う。通常の実行(D1の日足)では、yearly を指定しないので、従来どおり。
+  yearly: false, // true で、年ごとのICと、「通過」の条件に「年ごとに同じ向き」を加える
+  minDaysPerYear: 60, // 年ごとのICを出す最小の日数(これ未満の年は除く)
+  minYearShare: 0.8, // 「通過」に必要な、年ごとに同じ向きの割合(5年なら4年以上)
+  yearlyHorizons: [5, 20], // 年ごと・TOPIXの状態別の表を出す保有日数
+  regimeByDate: null, // Map(日付 → "up"|"down")。TOPIXが25日移動平均の上か下か(computeRegimes)
 };
 
 const FIELDS = ["open", "high", "low", "close", "volume"];
@@ -419,18 +425,62 @@ export function coverageOf(panel) {
 // ---------------------------------------------------------------------------------------------
 
 /** 探索期間と確認期間の両方で、同じ向きに、信頼区間が0を含まなければ「通過」。 */
-export function verdict(explore, holdout, { minDays = DEFAULTS.minDaysForVerdict } = {}) {
+export function verdict(explore, holdout, { minDays = DEFAULTS.minDaysForVerdict, consistency = null, minYearShare = null } = {}) {
   if (!explore || !holdout || explore.n < minDays || holdout.n < minDays || explore.lo === null || holdout.lo === null) return "データ不足";
   const sig = (s) => s.lo > 0 || s.hi < 0;
   const exSig = sig(explore);
   const hoSig = sig(holdout);
-  if (exSig && hoSig) return Math.sign(explore.mean) === Math.sign(holdout.mean) ? "通過" : "逆転";
+  if (exSig && hoSig) {
+    if (Math.sign(explore.mean) !== Math.sign(holdout.mean)) return "逆転";
+    // 年ごとの一貫性(長い期間の検証のとき): 前半・後半の両方で有意でも、年ごとに向きがばらつくなら、通過にしない
+    if (minYearShare !== null && consistency && consistency.share !== null && consistency.share < minYearShare) return "年ごとにばらつく";
+    return "通過";
+  }
   if (exSig) return "探索のみ(確認で消えた)";
   if (hoSig) return "確認のみ(探索では有意でない)";
   return "なし";
 }
 
 const pick = (days, fn) => days.map(fn).filter((x) => Number.isFinite(x));
+
+/** 年(暦年)ごとの平均。minDays 未満の年は除く。 */
+export function yearlyMeans(days, pickFn, minDays = DEFAULTS.minDaysPerYear) {
+  const byYear = new Map();
+  for (const d of days) {
+    const v = pickFn(d);
+    if (!Number.isFinite(v)) continue;
+    const year = d.date.slice(0, 4);
+    if (!byYear.has(year)) byYear.set(year, []);
+    byYear.get(year).push(v);
+  }
+  return [...byYear.entries()]
+    .filter(([, values]) => values.length >= minDays)
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([year, values]) => ({ year, n: values.length, mean: mean(values) }));
+}
+
+/** 全期間の平均と同じ向きだった年の数・割合。年が無い・全期間の平均が0なら share は null。 */
+export function yearConsistency(years, overallMean) {
+  if (!years.length || !Number.isFinite(overallMean) || overallMean === 0) return { years: years.length, same: 0, share: null };
+  const same = years.filter((y) => Math.sign(y.mean) === Math.sign(overallMean)).length;
+  return { years: years.length, same, share: same / years.length };
+}
+
+/**
+ * TOPIXの状態: その日の終値が、直近 window 日(その日を含む)の終値の平均以上なら "up"(上昇局面)、未満なら "down"(下落局面)。
+ * topixRows: [{date, close}]の昇順。window 日分が揃うまでは、状態を付けない。終値が不正な日は除く。
+ */
+export function computeRegimes(topixRows, { window = 25 } = {}) {
+  const rows = (topixRows ?? []).filter((r) => r && r.date && Number.isFinite(r.close) && r.close > 0);
+  const out = new Map();
+  let sum = 0;
+  for (let i = 0; i < rows.length; i++) {
+    sum += rows[i].close;
+    if (i >= window) sum -= rows[i - window].close;
+    if (i >= window - 1) out.set(rows[i].date, rows[i].close >= sum / window ? "up" : "down");
+  }
+  return out;
+}
 
 export function summarizeStudy(study, cfg = DEFAULTS) {
   const { days } = study;
@@ -448,6 +498,13 @@ export function summarizeStudy(study, cfg = DEFAULTS) {
       const hoTop = ci(pick(holdout, (d) => d.spread[feature][h]?.top));
       const hoBottom = ci(pick(holdout, (d) => d.spread[feature][h]?.bottom));
       const aiVals = pick(ai, (d) => d.ic[feature][h]?.ret);
+      let years = null;
+      let consistency = null;
+      if (cfg.yearly) {
+        years = yearlyMeans(days, (d) => d.ic[feature][h]?.ret, cfg.minDaysPerYear);
+        const all = pick(days, (d) => d.ic[feature][h]?.ret);
+        consistency = yearConsistency(years, all.length ? mean(all) : NaN);
+      }
       rows.push({
         feature,
         label,
@@ -457,7 +514,9 @@ export function summarizeStudy(study, cfg = DEFAULTS) {
         holdoutTop: hoTop,
         holdoutBottom: hoBottom,
         ai: { n: aiVals.length, mean: aiVals.length ? mean(aiVals) : null },
-        verdict: verdict(exIc, hoIc, { minDays: cfg.minDaysForVerdict }),
+        years,
+        consistency,
+        verdict: verdict(exIc, hoIc, { minDays: cfg.minDaysForVerdict, consistency, minYearShare: cfg.yearly ? cfg.minYearShare : null }),
       });
     }
   }
@@ -472,6 +531,27 @@ export function summarizeStudy(study, cfg = DEFAULTS) {
     rangeExplore: ci(pick(explore, (d) => d.ic[feature][h]?.range)),
     rangeHoldout: ci(pick(holdout, (d) => d.ic[feature][h]?.range)),
   }));
+
+  // TOPIXの状態(25日移動平均の上=上昇局面 / 下=下落局面)別の、成績との順位相関
+  let regime = null;
+  if (cfg.regimeByDate) {
+    regime = [];
+    for (const [feature, label] of FEATURES) {
+      for (const hh of cfg.yearlyHorizons) {
+        const up = days.filter((d) => cfg.regimeByDate.get(d.date) === "up");
+        const down = days.filter((d) => cfg.regimeByDate.get(d.date) === "down");
+        regime.push({
+          feature,
+          label,
+          h: hh,
+          upDays: up.length,
+          downDays: down.length,
+          up: ci(pick(up, (d) => d.ic[feature][hh]?.ret)),
+          down: ci(pick(down, (d) => d.ic[feature][hh]?.ret)),
+        });
+      }
+    }
+  }
 
   // 過去の値動きの区分別(その日の中での5等分。小さい順)の、その後の上昇余地・値幅
   const quintiles = {};
@@ -499,6 +579,7 @@ export function summarizeStudy(study, cfg = DEFAULTS) {
     },
     rows,
     movement,
+    regime,
     quintiles,
   };
 }
@@ -534,15 +615,44 @@ export function formatFeatureReport({ meta, summary }) {
       (meta.coverage.endedEarly === 0 ? " ← 途中で終わった銘柄が無いため、上場廃止の銘柄が含まれていない(生存者バイアスで、結果が良く見える)可能性があります。" : "")
   );
   L.push(`※ IC = 毎日の、特徴量とその後の成績の順位相関(+1に近いほど「高い銘柄ほど、その後の成績が良い」、-1に近いほど逆)。[ ]は95%信頼区間(ブロック・ブートストラップ)。`);
-  L.push(`※ 通過 = 探索期間と確認期間の両方で、同じ向きに、信頼区間が0を含まない。調べた数(特徴量×保有日数)が多いため、偶然の通過が混じる可能性があります。`);
+  L.push(`※ 通過 = 探索期間と確認期間の両方で、同じ向きに、信頼区間が0を含まない` + (meta.yearly ? `。さらに、年ごとのICが、全期間の向きと同じ年の割合が ${Math.round((meta.minYearShare ?? 0.8) * 100)}% 以上。` : `。`) + `調べた数(特徴量×保有日数)が多いため、偶然の通過が混じる可能性があります。`);
 
   L.push("", `## 成績(コスト控除後の騰落率)との順位相関`);
-  L.push(`| 特徴量 | 保有 | 探索期間のIC | 確認期間のIC | 確認期間: 上位${"10%"}−全体(%) | 確認期間: 下位10%−全体(%) | AI評価の期間のIC | 判定 |`);
-  L.push(`|---|---|---|---|---|---|---|---|`);
+  const showAi = meta.showAi !== false;
+  const showYear = Boolean(meta.yearly);
+  L.push(
+    `| 特徴量 | 保有 | 探索期間のIC | 確認期間のIC | 確認期間: 上位10%−全体(%) | 確認期間: 下位10%−全体(%) |${showAi ? " AI評価の期間のIC |" : ""}${showYear ? " 年ごとに同じ向き |" : ""} 判定 |`
+  );
+  L.push(`|---|---|---|---|---|---|${showAi ? "---|" : ""}${showYear ? "---|" : ""}---|`);
   for (const r of summary.rows) {
     L.push(
-      `| ${r.label} | ${r.h}日 | ${ciText(r.explore)} | ${ciText(r.holdout)} | ${ciText(r.holdoutTop, f2s)} | ${ciText(r.holdoutBottom, f2s)} | ${r.ai.n ? f2(r.ai.mean) : "-"} | ${r.verdict} |`
+      `| ${r.label} | ${r.h}日 | ${ciText(r.explore)} | ${ciText(r.holdout)} | ${ciText(r.holdoutTop, f2s)} | ${ciText(r.holdoutBottom, f2s)} |${showAi ? ` ${r.ai.n ? f2(r.ai.mean) : "-"} |` : ""}${showYear ? ` ${r.consistency && r.consistency.years ? `${r.consistency.same}/${r.consistency.years}年` : "-"} |` : ""} ${r.verdict} |`
     );
+  }
+
+  if (showYear) {
+    for (const hh of meta.yearlyHorizons ?? [5, 20]) {
+      const rowsH = summary.rows.filter((r) => r.h === hh && r.years);
+      const years = [...new Set(rowsH.flatMap((r) => r.years.map((y) => y.year)))].sort();
+      if (!years.length) continue;
+      L.push("", `## 年ごとの順位相関(コスト控除後の成績。保有${hh}営業日。各年の日ごとのICの平均)`);
+      L.push(`| 特徴量 | ${years.join(" | ")} |`);
+      L.push(`|---|${years.map(() => "---|").join("")}`);
+      for (const r of rowsH) {
+        L.push(`| ${r.label} | ${years.map((y) => f2(r.years.find((x) => x.year === y)?.mean ?? null)).join(" | ")} |`);
+      }
+    }
+  }
+
+  if (summary.regime?.length) {
+    for (const hh of meta.yearlyHorizons ?? [5, 20]) {
+      const rowsH = summary.regime.filter((r) => r.h === hh);
+      if (!rowsH.length) continue;
+      L.push("", `## TOPIXの状態別の順位相関(保有${hh}営業日。TOPIXの終値が25日移動平均の上=上昇局面(${rowsH[0].upDays}日)/下=下落局面(${rowsH[0].downDays}日))`);
+      L.push(`| 特徴量 | 上昇局面のIC | 下落局面のIC |`);
+      L.push(`|---|---|---|`);
+      for (const r of rowsH) L.push(`| ${r.label} | ${ciText(r.up)} | ${ciText(r.down)} |`);
+    }
   }
 
   L.push("", `## どれだけ動いたか(上昇余地・値幅)との順位相関(保有期間 ${meta.quintileHorizon}営業日)`);
