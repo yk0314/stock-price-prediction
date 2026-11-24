@@ -40,13 +40,36 @@ export function mapDailyRow(raw) {
 const ymd = (date) => date.replaceAll("-", "");
 
 /**
+ * 取得の開始日の既定: 今日(to)の5年前に、余裕の2日を足した日。
+ * J-Quantsの契約の範囲(Light)は「今日の5年前から」で、毎日1日ずつ後ろにずれる(2026-11-22 は 2021-11-22 から、11-23 は 2021-11-23 から)。
+ * 固定の日付にすると、翌日以降に「契約の範囲外」で失敗する。
+ */
+export function defaultFromDate(to, { years = 5, marginDays = 2 } = {}) {
+  const d = new Date(`${to}T00:00:00Z`);
+  d.setUTCFullYear(d.getUTCFullYear() - years);
+  d.setUTCDate(d.getUTCDate() + marginDays);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
  * 取引日ごとに、全銘柄の日足を取り、銘柄×営業日の表に入れる。
  *  - 最新日がまだ公表されていない(0件)場合は、その日を除く(最大3日)。
  *  - 取得に失敗した日は、最後にもう一度だけ取り直す。それでも失敗が maxFailedDays を超えたら中断する。
  *    残った失敗の日は、値が欠けたまま(その日を含む窓の特徴量・成績は作られず、推測しない)。
  */
 export async function loadLongPanel({ client, from, to, log = () => {}, maxFailedDays = 20, now = () => Date.now() }) {
-  const calendar = parseTradingCalendar(await client.fetchTradingCalendar(from, to));
+  let calendarRows;
+  try {
+    calendarRows = await client.fetchTradingCalendar(from, to);
+  } catch (err) {
+    // 契約の範囲(「今日の5年前から」で、毎日ずれる)より前を指定したときは、範囲の始まりに合わせて、1回だけやり直す
+    const start = err?.subscriptionRange?.from;
+    if (!start || start <= from) throw err;
+    log(`[features-long] 契約の範囲に合わせて、開始日を ${from} → ${start} に変更します`);
+    from = start;
+    calendarRows = await client.fetchTradingCalendar(from, to);
+  }
+  const calendar = parseTradingCalendar(calendarRows);
   let tradingDays = calendar.filter((d) => d >= from && d <= to);
   if (tradingDays.length < 100) throw new Error(`取引日が少なすぎます(${tradingDays.length}日)。期間(${from}〜${to})を確認してください。`);
 
@@ -110,7 +133,7 @@ export async function runLongStudy({ client, from, to, cfgOverrides = {}, log = 
   // TOPIXの状態(25日移動平均の上・下)
   let regimeByDate = null;
   try {
-    const topix = await fetchTopixForRange(client, from, to, to);
+    const topix = await fetchTopixForRange(client, tradingDays[0], to, to);
     regimeByDate = computeRegimes(topix);
     log(`[features-long] TOPIX: ${topix.length}日分(状態を付けた日 ${regimeByDate.size}日)`);
   } catch (err) {

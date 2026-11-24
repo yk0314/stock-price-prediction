@@ -3,16 +3,17 @@
 //
 // 使い方:
 //   必要な環境変数: JQUANTS_API_KEY(プランに合わせて JQUANTS_PLAN も。既定は light = 毎分60回)
-//   node scripts/analyze-features-jquants.js [--from 2021-11-22] [--holdout-from 2024-07-01] [--cost-pct 0.3] [--min-turnover-oku 1] [--horizons 1,3,5,10,20]
+//   node scripts/analyze-features-jquants.js [--from 今日の5年前の2日後(既定)] [--holdout-from 2024-07-01] [--cost-pct 0.3] [--min-turnover-oku 1] [--horizons 1,3,5,10,20]
 //
 // 取得量: 営業日ごとに1リクエスト。5年(約1,230営業日)で、毎分60回なら約26〜30分。
+// 契約の範囲より前を指定すると、範囲の始まりに合わせて、自動でやり直す。
 // 17:10 JST から始まる通常のパイプライン(約90分)と同時に動かさない(J-Quantsのレート制限は、APIキー単位で共有される)。
 // 試しに短く動かすなら、--from に最近の日付(例: 2026-03-02)を指定する(約190営業日 → 約5分)。
 import { appendFile } from "node:fs/promises";
 import { writeArtifact } from "../src/artifacts.js";
 import { jstDateString } from "../src/cutoff.js";
 import { JQuantsClient } from "../src/jquants.js";
-import { LONG_DEFAULTS, runLongStudy } from "../src/featureStudyLong.js";
+import { LONG_DEFAULTS, defaultFromDate, runLongStudy } from "../src/featureStudyLong.js";
 
 function parseArgs(argv, env) {
   const get = (name, envName) => {
@@ -35,10 +36,11 @@ function parseArgs(argv, env) {
   const horizonsRaw = String(get("horizons", "FEATURES_HORIZONS")).trim();
   const horizons = horizonsRaw ? horizonsRaw.split(",").map((x) => Number(x.trim())) : LONG_DEFAULTS.horizons;
   if (!horizons.length || horizons.some((h) => !Number.isInteger(h) || h < 1 || h > 60)) throw new Error(`--horizons は1〜60の整数をカンマ区切りで指定してください: ${horizonsRaw}`);
+  const to = date("to", "FEATURES_TO", jstDateString());
   return {
-    // 契約の範囲(J-Quants Light: 2021-11-22 以降。scripts/probe-jquants.mjs で確認済み)
-    from: date("from", "FEATURES_FROM", "2021-11-22"),
-    to: date("to", "FEATURES_TO", jstDateString()),
+    // 契約の範囲(J-Quants Light)は「今日の5年前から」で、毎日1日ずつ後ろにずれる。既定は、5年前の2日後(固定の日付にしない)
+    from: date("from", "FEATURES_FROM", defaultFromDate(to)),
+    to,
     holdoutFrom: date("holdout-from", "FEATURES_HOLDOUT_FROM", LONG_DEFAULTS.holdoutFrom),
     costPct: number("cost-pct", "FEATURES_COST_PCT", LONG_DEFAULTS.costPct, 0, 5),
     minTurnoverOku: number("min-turnover-oku", "FEATURES_MIN_TURNOVER_OKU", LONG_DEFAULTS.minTurnoverYen / 100_000_000, 0, 1000),

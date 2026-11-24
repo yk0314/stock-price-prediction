@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       from:
-        description: "取得の開始日(YYYY-MM-DD)。省略時は 2021-11-22(契約の範囲の始まり)"
+        description: "取得の開始日(YYYY-MM-DD)。省略時は、今日の5年前の2日後(契約の範囲は、毎日1日ずつ後ろにずれる)"
         required: false
         default: ""
       holdoutFrom:

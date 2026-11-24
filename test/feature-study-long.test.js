@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { mulberry32 } from "../src/backtestD1.js";
 import { weekdayDates } from "../src/tradingCalendar.js";
-import { loadLongPanel, mapDailyRow, runLongStudy, LONG_DEFAULTS } from "../src/featureStudyLong.js";
+import { defaultFromDate, loadLongPanel, mapDailyRow, runLongStudy, LONG_DEFAULTS } from "../src/featureStudyLong.js";
 import { computeRegimes, summarizeStudy, verdict, yearConsistency, yearlyMeans, DEFAULTS } from "../src/featureStudy.js";
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
@@ -172,6 +172,52 @@ test("取得の流れ: 最新日が0件なら除く。失敗した日は取り�
   await assert.rejects(() => loadLongPanel({ client: bad, from: "2022-01-03", to: lastDay, maxFailedDays: 3 }), /失敗した日が多すぎます/);
   // 取引日が少なすぎれば、中断する
   await assert.rejects(() => loadLongPanel({ client, from: "2022-07-01", to: lastDay }), /取引日が少なすぎます/);
+});
+
+// ---------------------------------------------------------------------------------------------
+test("開始日の既定: 今日の5年前の2日後。契約の範囲(毎日1日ずつずれる)より後ろになる。うるう日でも日付が壊れない", () => {
+  assert.equal(defaultFromDate("2026-11-22"), "2021-11-24"); // 契約の範囲は 2021-11-22 から
+  assert.equal(defaultFromDate("2026-11-23"), "2021-11-25"); // 契約の範囲は 2021-11-23 から(実際に、固定の日付で失敗した日)
+  assert.ok(defaultFromDate("2026-11-23") > "2021-11-23");
+  assert.equal(defaultFromDate("2028-02-29"), "2023-03-03"); // 5年前の2月29日は存在しない → 3月1日 + 2日
+  assert.equal(defaultFromDate("2026-01-01", { years: 3, marginDays: 0 }), "2023-01-01");
+});
+
+test("契約の範囲より前の開始日を指定したら、範囲の始まりに合わせて、1回だけやり直す(範囲外のエラーで失敗しない)", async () => {
+  const days = weekdayDates("2022-01-03", "2022-08-31");
+  const rowsByDate = new Map(days.map((d) => [d, [jqRow("72030", d, { open: 100, high: 101, low: 99, close: 100, volume: 10 })]]));
+  const client = new FakeClient({ days, rowsByDate });
+  const allowedFrom = "2022-02-01";
+  const calls = [];
+  const original = client.fetchTradingCalendar.bind(client);
+  client.fetchTradingCalendar = async (from, to) => {
+    calls.push(from);
+    if (from < allowedFrom) {
+      const err = new Error(`J-Quants APIエラー 400: Your subscription covers the following dates: ${allowedFrom} ~`);
+      err.subscriptionRange = { from: allowedFrom, to: null };
+      throw err;
+    }
+    return original(from, to);
+  };
+  const logs = [];
+  const { tradingDays } = await loadLongPanel({ client, from: "2022-01-03", to: "2022-08-31", log: (m) => logs.push(m) });
+  assert.deepEqual(calls, ["2022-01-03", allowedFrom]); // 1回目は失敗、範囲に合わせて2回目
+  assert.ok(tradingDays[0] >= allowedFrom);
+  assert.ok(logs.some((m) => m.includes("契約の範囲に合わせて")));
+
+  // 範囲のエラーでないものや、範囲が開始日より後ろでないものは、そのまま失敗させる(無限にやり直さない)
+  const failing = new FakeClient({ days, rowsByDate });
+  failing.fetchTradingCalendar = async () => {
+    throw new Error("HTTP 500");
+  };
+  await assert.rejects(() => loadLongPanel({ client: failing, from: "2022-01-03", to: "2022-08-31" }), /HTTP 500/);
+  const odd = new FakeClient({ days, rowsByDate });
+  odd.fetchTradingCalendar = async () => {
+    const err = new Error("range error");
+    err.subscriptionRange = { from: "2021-01-01", to: null }; // 開始日より前(やり直しても変わらない)
+    throw err;
+  };
+  await assert.rejects(() => loadLongPanel({ client: odd, from: "2022-01-03", to: "2022-08-31" }), /range error/);
 });
 
 // ---------------------------------------------------------------------------------------------
