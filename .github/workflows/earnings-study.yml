@@ -1,0 +1,72 @@
+name: Earnings Study (manual)
+
+# 決算データの検証(決算またぎ / 決算後の動き / 業績の物差し)。
+# J-Quantsだけにアクセスし、D1・KV・Geminiは使わない。手動実行専用。
+# J-Quantsのレート制限を共有するため、平日17:00〜19:30 JSTのpipeline・sync-prices実行中は避ける。
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: '取得開始日(空欄=今日の5年前の2日後。試運転は 2026-03-02 など)'
+        required: false
+        default: ''
+      to:
+        description: '取得終了日(空欄=今日)'
+        required: false
+        default: ''
+      explore_end:
+        description: '探索期間の最終日(これより後が確認期間)'
+        required: false
+        default: '2024-06-30'
+      cost_pct:
+        description: '往復コスト(%)'
+        required: false
+        default: '0.3'
+      min_va:
+        description: '買う日より前20営業日の平均売買代金の下限(円)'
+        required: false
+        default: '50000000'
+      holds:
+        description: '保有営業日(カンマ区切り)'
+        required: false
+        default: '1,3,5,10,20'
+      min_interval_ms:
+        description: 'リクエスト間隔(ミリ秒)'
+        required: false
+        default: '1250'
+
+concurrency:
+  group: jquants-study
+  cancel-in-progress: false
+
+jobs:
+  study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run earnings study
+        env:
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+          FROM: ${{ inputs.from }}
+          TO: ${{ inputs.to }}
+          EXPLORE_END: ${{ inputs.explore_end }}
+          COST_PCT: ${{ inputs.cost_pct }}
+          MIN_VA: ${{ inputs.min_va }}
+          HOLDS: ${{ inputs.holds }}
+          MIN_INTERVAL_MS: ${{ inputs.min_interval_ms }}
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: node scripts/analyze-earnings-jquants.js
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: earnings-study
+          path: |
+            data/earnings-study.txt
+            data/earnings-study.json
+            data/earnings-events.json
+          if-no-files-found: ignore
