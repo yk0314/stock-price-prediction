@@ -12,6 +12,7 @@
 //   MIN_VA               買う日より前20営業日の平均売買代金(円)の下限(既定 50000000)
 //   HOLDS                保有営業日(既定 1,3,5,10,20)
 //   MIN_INTERVAL_MS      リクエスト間隔ms(既定 1250 = 毎分約48回)
+//   USE_CACHE=1          data/cache に保存済みのデータがあれば再取得せず計算だけやり直す(期間は保存時のまま)
 import fs from 'node:fs';
 import path from 'node:path';
 import { buildEvents, formatReport, runStudy, toIsoDate, toShortCode } from '../src/earningsStudy.js';
@@ -107,10 +108,52 @@ function elapsed(t0) {
   return ((Date.now() - t0) / 60000).toFixed(1);
 }
 
-async function main() {
-  const t0 = Date.now();
-  fs.mkdirSync(OUT_DIR, { recursive: true });
+const CACHE_DIR = path.join(OUT_DIR, 'cache');
+const USE_CACHE = ['1', 'true'].includes(String(process.env.USE_CACHE || '').toLowerCase());
 
+// 取得済みデータの保存(日足の始値・売買代金・財務の行)。同じ期間なら再取得せずに計算だけやり直せる。
+function saveCache({ days, stocks, finRows }) {
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
+  const T = days.length;
+  const S = stocks.length;
+  const open = new Float64Array(S * T);
+  const va = new Float32Array(S * T);
+  stocks.forEach((st, s) => {
+    open.set(st.open, s * T);
+    va.set(st.va, s * T);
+  });
+  fs.writeFileSync(path.join(CACHE_DIR, 'open.f64'), Buffer.from(open.buffer));
+  fs.writeFileSync(path.join(CACHE_DIR, 'va.f32'), Buffer.from(va.buffer));
+  fs.writeFileSync(path.join(CACHE_DIR, 'fins.json'), JSON.stringify(finRows));
+  fs.writeFileSync(
+    path.join(CACHE_DIR, 'meta.json'),
+    JSON.stringify({ version: 1, from: days[0], to: days[T - 1], days, codes: stocks.map((x) => x.code), savedAt: new Date().toISOString() }),
+  );
+  fs.writeFileSync(path.join(CACHE_DIR, '.fetched'), new Date().toISOString());
+}
+
+function loadCache() {
+  const metaPath = path.join(CACHE_DIR, 'meta.json');
+  if (!fs.existsSync(metaPath)) return null;
+  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  if (meta.version !== 1) return null;
+  const T = meta.days.length;
+  const S = meta.codes.length;
+  const ob = fs.readFileSync(path.join(CACHE_DIR, 'open.f64'));
+  const vb = fs.readFileSync(path.join(CACHE_DIR, 'va.f32'));
+  if (ob.length !== S * T * 8 || vb.length !== S * T * 4) return null;
+  const open = new Float64Array(ob.buffer.slice(ob.byteOffset, ob.byteOffset + ob.length));
+  const va = new Float32Array(vb.buffer.slice(vb.byteOffset, vb.byteOffset + vb.length));
+  const stocks = meta.codes.map((code, s) => ({
+    code,
+    open: open.subarray(s * T, (s + 1) * T),
+    va: va.subarray(s * T, (s + 1) * T),
+  }));
+  const finRows = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, 'fins.json'), 'utf8'));
+  return { days: meta.days, stocks, finRows, meta };
+}
+
+async function fetchAll(t0) {
   // 1) 営業日
   const cal = await fetchCalendar();
   const candidate = cal
@@ -194,6 +237,25 @@ async function main() {
   }
   console.log('書類種別(DocType)の件数:');
   for (const [k, v] of [...docTypes.entries()].sort((a, b) => b[1] - a[1])) console.log(`  ${k}: ${v}`);
+  return { days, stocks, finRows };
+}
+
+async function main() {
+  const t0 = Date.now();
+  fs.mkdirSync(OUT_DIR, { recursive: true });
+
+  let data = USE_CACHE ? loadCache() : null;
+  if (data) {
+    console.log(
+      `保存済みデータを使います: ${data.days[0]} 〜 ${data.days[data.days.length - 1]} / ${data.days.length}営業日・${data.stocks.length}銘柄・財務${data.finRows.length}行 (取得は行いません。FROM/TOは無視)`,
+    );
+  } else {
+    if (USE_CACHE) console.log('保存済みデータが見つからないため、通常どおり取得します');
+    data = await fetchAll(t0);
+    saveCache(data);
+    console.log(`取得データを ${CACHE_DIR} に保存しました`);
+  }
+  const { days, stocks, finRows } = data;
 
   const events = buildEvents(finRows);
   const nFS = events.filter((e) => e.cls === 'FS').length;

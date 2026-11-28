@@ -30,6 +30,10 @@ on:
         description: '保有営業日(カンマ区切り)'
         required: false
         default: '1,3,5,10,20'
+      use_cache:
+        description: '保存済みの取得データがあれば再取得せず計算だけやり直す(true/false。期間は保存時のまま)'
+        required: false
+        default: 'false'
       min_interval_ms:
         description: 'リクエスト間隔(ミリ秒)'
         required: false
@@ -48,6 +52,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Restore fetched data
+        if: ${{ inputs.use_cache == 'true' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: data/cache
+          key: earnings-study-data-restore
+          restore-keys: |
+            earnings-study-data-
       - name: Run earnings study
         env:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
@@ -58,8 +70,15 @@ jobs:
           MIN_VA: ${{ inputs.min_va }}
           HOLDS: ${{ inputs.holds }}
           MIN_INTERVAL_MS: ${{ inputs.min_interval_ms }}
+          USE_CACHE: ${{ inputs.use_cache }}
           NODE_OPTIONS: --max-old-space-size=4096
         run: node scripts/analyze-earnings-jquants.js
+      - name: Save fetched data
+        if: ${{ always() && hashFiles('data/cache/.fetched') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: data/cache
+          key: earnings-study-data-${{ github.run_id }}
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4

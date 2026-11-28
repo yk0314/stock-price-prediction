@@ -576,7 +576,10 @@ export function runStudy(dataset, options = {}) {
                 rr.map((r) => r.ex),
                 rr.map((r) => r.e.entry),
               ),
-              net: mean(rr.map((r) => r.ret - cost)),
+              net: clusterMean(
+                rr.map((r) => r.ret - cost),
+                rr.map((r) => r.e.entry),
+              ),
               n: rr.length,
             };
           });
@@ -586,7 +589,14 @@ export function runStudy(dataset, options = {}) {
           spread[p] = { mean: d, se, lo: d - 1.96 * se, hi: d + 1.96 * se };
         }
       }
-      pead[sig].byHold[h] = { ic, buckets, spread };
+      // 「買う側」の通過: 上位20% / 下位20% を買った場合の超過リターンが、両期間で95%区間の下限>0
+      const sidePass = (b) =>
+        !!buckets &&
+        buckets.explore[b].n >= 100 &&
+        buckets.confirm[b].n >= 100 &&
+        buckets.explore[b].ex.lo > 0 &&
+        buckets.confirm[b].ex.lo > 0;
+      pead[sig].byHold[h] = { ic, buckets, spread, longTop: sidePass(4), longBottom: sidePass(0) };
     }
   }
 
@@ -748,11 +758,33 @@ export function formatReport(res) {
       if (r.spread) {
         const cf = r.spread.confirm;
         const q5 = r.buckets.confirm[4];
-        tail = ` | 確認 上位−下位 ${pct(cf.mean)}[${pct(cf.lo)},${pct(cf.hi)}] 上位買い${pct(q5.net)}(n=${q5.n})`;
+        tail = ` | 確認 上位−下位 ${pct(cf.mean)}[${pct(cf.lo)},${pct(cf.hi)}] 上位買い${pct(q5.net.mean)}(n=${q5.n})`;
       }
       L.push(
         `  ${h}日 ${mark} IC 探索${nwIc(r.ic.explore)} 確認${nwIc(r.ic.confirm)} 年${r.ic.years.same}/${r.ic.years.total}${tail}`,
       );
+    }
+  }
+  L.push('');
+
+  L.push('--- 2b. 買う側の成績(上位20%・下位20%それぞれを買った場合。超過リターン=同じ日の流動性ある全銘柄の平均との差) ---');
+  L.push('「通過」= 探索・確認の両期間で超過リターンの95%区間の下限が0より上。下位=逆張り(悪い業績の銘柄を買う)。区切り値は探索期間だけで決定');
+  for (const sig of SIGNALS) {
+    if (!res.pead[sig].cuts) {
+      L.push(`# ${SIGNAL_LABELS[sig]} (${sig}): 探索期間のイベントが少なく省略`);
+      continue;
+    }
+    const cnt = (k) => o.holds.filter((h) => res.pead[sig].byHold[h][k]).length;
+    L.push(`# ${SIGNAL_LABELS[sig]} (${sig}) 通過した保有日数: 下位買い ${cnt('longBottom')}/${o.holds.length} 上位買い ${cnt('longTop')}/${o.holds.length}`);
+    for (const h of o.holds) {
+      const r = res.pead[sig].byHold[h];
+      const side = (b, name, flag) => {
+        const e = r.buckets.explore[b];
+        const c = r.buckets.confirm[b];
+        return `${name}${flag ? '★' : ' '} 探索${nwPct(e.ex)}(n=${e.n}) 確認${nwPct(c.ex)}(n=${c.n}) 確認コスト後${pct(c.net.mean)}`;
+      };
+      L.push(`  ${h}日 ${side(0, '下位買い', r.longBottom)}`);
+      L.push(`       ${side(4, '上位買い', r.longTop)}`);
     }
   }
   L.push('');

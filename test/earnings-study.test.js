@@ -110,7 +110,7 @@ function weekdays(startIso, n) {
   return out;
 }
 
-function makeDataset({ plantDrift, plantEntryJump, plantEventVol, seed = 7 }) {
+function makeDataset({ plantDrift, plantReverse, plantEntryJump, plantEventVol, seed = 7 }) {
   const r = rng(seed);
   const T = 360;
   const days = weekdays('2023-01-02', T);
@@ -133,6 +133,7 @@ function makeDataset({ plantDrift, plantEntryJump, plantEventVol, seed = 7 }) {
       if (entry + 6 >= T) return;
       if (plantEntryJump) dailyShock[entry] += 0.06 * Math.sign(evSig[q]); // 開示後の最初の始値(買い値より前)で動く
       if (plantDrift) for (let t = entry; t < entry + 5; t++) dailyShock[t + 1] += 0.004 * Math.sign(evSig[q]);
+      if (plantReverse) for (let t = entry; t < entry + 5; t++) dailyShock[t + 1] -= 0.004 * Math.sign(evSig[q]);
       if (plantEventVol) for (let t = d; t <= d + 1; t++) dailyShock[t] += 0.03 * gauss(r); // 決算またぎで値幅が大きくなる
     });
     let p = 1000;
@@ -223,4 +224,23 @@ test('レポートが文字列で出る', () => {
   assert.ok(txt.includes('2. 決算後の動き'));
   assert.ok(txt.includes('3. 毎日の順位づけ'));
   assert.ok(mean([1, 2, 3]) === 2);
+});
+
+test('買う側の成績: 逆張り効果(悪い業績ほど上がる)は「下位買い」が通過し、「上位買い」は通過しない', () => {
+  const ds = makeDataset({ plantReverse: true });
+  const res = runStudy(ds, { exploreEnd: days180(ds), holds: [5], minEventIcN: 15 });
+  const r5 = res.pead.opYoY.byHold[5];
+  assert.equal(r5.longBottom, true);
+  assert.equal(r5.longTop, false);
+  assert.ok(r5.buckets.confirm[0].ex.mean > 0 && r5.buckets.confirm[4].ex.mean < 0);
+  assert.ok(formatReport(res).includes('2b. 買う側の成績'));
+});
+
+test('買う側の成績: 順張り効果は「上位買い」が通過し、効果なしなら両方とも通過しない', () => {
+  const up = runStudy(makeDataset({ plantDrift: true }), { exploreEnd: days180(makeDataset({})), holds: [5] });
+  assert.equal(up.pead.opYoY.byHold[5].longTop, true);
+  assert.equal(up.pead.opYoY.byHold[5].longBottom, false);
+  const none = runStudy(makeDataset({}), { exploreEnd: days180(makeDataset({})), holds: [5] });
+  assert.equal(none.pead.opYoY.byHold[5].longTop, false);
+  assert.equal(none.pead.opYoY.byHold[5].longBottom, false);
 });
